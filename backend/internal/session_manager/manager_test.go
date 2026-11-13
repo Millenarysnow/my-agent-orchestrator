@@ -6352,6 +6352,43 @@ func TestSpawnOrchestrator_ProjectRulesInSystemPrompt(t *testing.T) {
 	}
 }
 
+func TestBuildSystemPromptLoadsOnlyTheMatchingFixedRoleRules(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, workerRulesFilename), []byte("Worker-only fixed rule."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, orchestratorRulesFilename), []byte("Orchestrator-only fixed rule."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Path: dir, Config: testRoleAgents()}
+	agent := &recordingAgent{}
+	m := New(Deps{
+		Runtime: &fakeRuntime{}, Agents: singleAgent{agent: agent}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+	})
+
+	for _, tc := range []struct {
+		name   string
+		kind   domain.SessionKind
+		want   string
+		forbid string
+	}{
+		{name: "worker", kind: domain.KindWorker, want: "Worker-only fixed rule.", forbid: "Orchestrator-only fixed rule."},
+		{name: "orchestrator", kind: domain.KindOrchestrator, want: "Orchestrator-only fixed rule.", forbid: "Worker-only fixed rule."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := m.buildSystemPrompt(ctx, tc.kind, "mer", "mer-1", "", false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(got, tc.want) || strings.Contains(got, tc.forbid) {
+				t.Fatalf("role prompt = %q, want %q and not %q", got, tc.want, tc.forbid)
+			}
+		})
+	}
+}
+
 // TestSpawnOrchestrator_OrchestratorRulesFileInSystemPrompt covers
 // OrchestratorRulesFile: a repo-relative file read fresh on every spawn and
 // restore, mirroring AgentRulesFile for the worker role. Unlike inline

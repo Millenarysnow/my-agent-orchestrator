@@ -265,6 +265,86 @@ func TestBuildProjectRules_ReadsInlineAndFileRules(t *testing.T) {
 	}
 }
 
+func TestBuildProjectRules_ReadsOptionalFileAfterConfiguredRules(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "configured.md"), []byte("Configured file rule."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, workerRulesFilename), []byte("Fixed worker rule."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := buildProjectRules(projectRulesConfig{
+		ProjectPath:       dir,
+		Rules:             "Inline rule.",
+		RulesFile:         "configured.md",
+		RulesFileField:    "agentRulesFile",
+		OptionalRulesFile: workerRulesFilename,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inlineIndex := strings.Index(got, "Inline rule.")
+	configuredIndex := strings.Index(got, "Configured file rule.")
+	fixedIndex := strings.Index(got, "Fixed worker rule.")
+	if inlineIndex < 0 || configuredIndex < inlineIndex || fixedIndex < configuredIndex {
+		t.Fatalf("rules = %q, want inline, configured file, then fixed file", got)
+	}
+}
+
+func TestBuildProjectRules_SkipsMissingOptionalFileAndDuplicatePath(t *testing.T) {
+	dir := t.TempDir()
+	got, err := buildProjectRules(projectRulesConfig{
+		ProjectPath:       dir,
+		Rules:             "Inline rule.",
+		OptionalRulesFile: workerRulesFilename,
+	})
+	if err != nil || got != "Inline rule." {
+		t.Fatalf("missing optional file = (%q, %v), want inline rule and no error", got, err)
+	}
+	got, err = buildProjectRules(projectRulesConfig{
+		ProjectPath:       dir,
+		RulesFile:         workerRulesFilename,
+		RulesFileField:    "agentRulesFile",
+		OptionalRulesFile: workerRulesFilename,
+	})
+	if err != nil || got != "" {
+		t.Fatalf("missing fixed file selected by legacy config = (%q, %v), want empty rules and no error", got, err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, workerRulesFilename), []byte("Fixed worker rule."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err = buildProjectRules(projectRulesConfig{
+		ProjectPath:       dir,
+		RulesFile:         "./" + workerRulesFilename,
+		RulesFileField:    "agentRulesFile",
+		OptionalRulesFile: workerRulesFilename,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := strings.Count(got, "Fixed worker rule."); count != 1 {
+		t.Fatalf("fixed rule appears %d times in %q, want once", count, got)
+	}
+}
+
+func TestBuildProjectRules_OptionalReadErrorsStillFail(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "AO-WORKER.md"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := buildProjectRules(projectRulesConfig{ProjectPath: dir, OptionalRulesFile: workerRulesFilename}); err == nil {
+		t.Fatal("expected a read error for a directory named like the rules file")
+	}
+}
+
+func TestBuildProjectRules_SkipsOptionalFileWithoutProjectPath(t *testing.T) {
+	got, err := buildProjectRules(projectRulesConfig{OptionalRulesFile: workerRulesFilename})
+	if err != nil || got != "" {
+		t.Fatalf("optional file without project = (%q, %v), want empty rules and no error", got, err)
+	}
+}
+
 func TestBuildProjectRules_ErrorsNameConfigKey(t *testing.T) {
 	dir := t.TempDir()
 	for _, field := range []string{"agentRulesFile", "orchestratorRulesFile"} {

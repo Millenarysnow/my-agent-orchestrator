@@ -5993,10 +5993,11 @@ func (m *Manager) buildSystemPrompt(ctx context.Context, kind domain.SessionKind
 	switch kind {
 	case domain.KindOrchestrator:
 		rules, err := buildProjectRules(projectRulesConfig{
-			ProjectPath:    project.Path,
-			Rules:          project.Config.OrchestratorRules,
-			RulesFile:      project.Config.OrchestratorRulesFile,
-			RulesFileField: "orchestratorRulesFile",
+			ProjectPath:       project.Path,
+			Rules:             project.Config.OrchestratorRules,
+			RulesFile:         project.Config.OrchestratorRulesFile,
+			OptionalRulesFile: orchestratorRulesFilename,
+			RulesFileField:    "orchestratorRulesFile",
 		})
 		if err != nil {
 			return "", err
@@ -6013,10 +6014,11 @@ func (m *Manager) buildSystemPrompt(ctx context.Context, kind domain.SessionKind
 			}
 		}
 		rules, err := buildProjectRules(projectRulesConfig{
-			ProjectPath:    project.Path,
-			Rules:          project.Config.AgentRules,
-			RulesFile:      project.Config.AgentRulesFile,
-			RulesFileField: "agentRulesFile",
+			ProjectPath:       project.Path,
+			Rules:             project.Config.AgentRules,
+			RulesFile:         project.Config.AgentRulesFile,
+			OptionalRulesFile: workerRulesFilename,
+			RulesFileField:    "agentRulesFile",
 		})
 		if err != nil {
 			return "", err
