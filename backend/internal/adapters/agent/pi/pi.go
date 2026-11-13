@@ -8,9 +8,9 @@
 // relies on prompts not beginning with a literal "-".
 //
 // System prompts are appended to Pi's default coding-assistant prompt via
-// `--append-system-prompt <text>`. Pi's flag takes inline text only (no file
-// variant), so a system-prompt file is read from disk and its contents are
-// inlined into the flag; a read failure aborts the launch.
+// `--append-system-prompt <text|path>`. Prefer AO's system-prompt file so large
+// orchestrator instructions do not exceed Windows batch command-line limits.
+// An unreadable prompt file aborts the launch rather than becoming literal text.
 //
 // Permissions: Pi has no permission/approval CLI flags ("No permission popups" --
 // confirmation flows are built via TypeScript extensions), so AO emits no
@@ -94,7 +94,7 @@ func (p *Plugin) GetConfigSpec(ctx context.Context) (ports.ConfigSpec, error) {
 
 // GetLaunchCommand builds the argv to start a new interactive Pi session:
 //
-//	pi [--append-system-prompt <system prompt>] [--model <model>] [<prompt>]
+//	pi [--append-system-prompt <text|path>] [--model <model>] [<prompt>]
 //
 // The prompt is delivered in-command as a trailing positional message. Pi does
 // not honor a `--` options terminator, so the prompt must not begin with "-".
@@ -107,14 +107,8 @@ func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (
 
 	cmd = []string{binary}
 	appendPiExtensionFlag(&cmd, cfg.WorkspacePath)
-	if cfg.SystemPrompt != "" {
-		cmd = append(cmd, "--append-system-prompt", cfg.SystemPrompt)
-	} else if cfg.SystemPromptFile != "" {
-		data, err := os.ReadFile(cfg.SystemPromptFile) //nolint:gosec // path is AO-owned launch config
-		if err != nil {
-			return nil, err
-		}
-		cmd = append(cmd, "--append-system-prompt", string(data))
+	if err := appendSystemPromptFlag(ctx, &cmd, cfg.SystemPrompt, cfg.SystemPromptFile); err != nil {
+		return nil, err
 	}
 	appendModelFlag(&cmd, cfg.Config)
 	if cfg.Prompt != "" {
@@ -142,14 +136,8 @@ func (p *Plugin) GetRestoreCommand(ctx context.Context, cfg ports.RestoreConfig)
 	}
 	cmd = []string{binary}
 	appendPiExtensionFlag(&cmd, cfg.Session.WorkspacePath)
-	if cfg.SystemPrompt != "" {
-		cmd = append(cmd, "--append-system-prompt", cfg.SystemPrompt)
-	} else if cfg.SystemPromptFile != "" {
-		data, err := os.ReadFile(cfg.SystemPromptFile) //nolint:gosec // path is AO-owned launch config
-		if err != nil {
-			return nil, false, err
-		}
-		cmd = append(cmd, "--append-system-prompt", string(data))
+	if err := appendSystemPromptFlag(ctx, &cmd, cfg.SystemPrompt, cfg.SystemPromptFile); err != nil {
+		return nil, false, err
 	}
 	appendModelFlag(&cmd, cfg.Config)
 	cmd = append(cmd, "--session", agentSessionID)
@@ -164,6 +152,24 @@ func (p *Plugin) SessionInfo(ctx context.Context, session ports.SessionRef) (por
 	}
 	info, ok := agentbase.StandardSessionInfo(session)
 	return info, ok, nil
+}
+
+func appendSystemPromptFlag(ctx context.Context, cmd *[]string, prompt, file string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if file != "" {
+		// Pi treats a nonexistent path as inline text. Check readability first
+		// so a missing file cannot silently discard AO's role instructions.
+		if _, err := os.ReadFile(file); err != nil { //nolint:gosec // path is AO-owned launch config
+			return err
+		}
+		prompt = file
+	}
+	if prompt != "" {
+		*cmd = append(*cmd, "--append-system-prompt", prompt)
+	}
+	return nil
 }
 
 func appendModelFlag(cmd *[]string, cfg ports.AgentConfig) {

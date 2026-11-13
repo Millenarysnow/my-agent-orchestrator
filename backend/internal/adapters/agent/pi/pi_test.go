@@ -172,7 +172,7 @@ func TestGetLaunchCommandAppendsSystemPrompt(t *testing.T) {
 	}
 }
 
-func TestGetLaunchCommandPrefersInlineSystemPrompt(t *testing.T) {
+func TestGetLaunchCommandPrefersSystemPromptFile(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "system.md")
 	if err := os.WriteFile(file, []byte("file contents win"), 0o600); err != nil {
@@ -182,13 +182,13 @@ func TestGetLaunchCommandPrefersInlineSystemPrompt(t *testing.T) {
 	p := &Plugin{resolvedBinary: "pi"}
 	cmd, err := p.GetLaunchCommand(context.Background(), ports.LaunchConfig{
 		SystemPromptFile: file,
-		SystemPrompt:     "inline wins",
+		SystemPrompt:     "inline fallback",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	want := []string{"pi", "--append-system-prompt", "inline wins"}
+	want := []string{"pi", "--append-system-prompt", file}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("cmd = %#v, want %#v", cmd, want)
 	}
@@ -198,6 +198,7 @@ func TestGetLaunchCommandSystemPromptFileReadError(t *testing.T) {
 	p := &Plugin{resolvedBinary: "pi"}
 	_, err := p.GetLaunchCommand(context.Background(), ports.LaunchConfig{
 		SystemPromptFile: filepath.Join(t.TempDir(), "missing.md"),
+		SystemPrompt:     "must not hide a missing prompt file",
 	})
 	if err == nil {
 		t.Fatal("expected error for unreadable system-prompt file, got nil")
@@ -207,8 +208,7 @@ func TestGetLaunchCommandSystemPromptFileReadError(t *testing.T) {
 func TestGetRestoreCommand(t *testing.T) {
 	p := &Plugin{resolvedBinary: "pi"}
 	cmd, ok, err := p.GetRestoreCommand(context.Background(), ports.RestoreConfig{
-		SystemPrompt:     "restore inline wins",
-		SystemPromptFile: filepath.Join(t.TempDir(), "missing.md"),
+		SystemPrompt: "restore inline fallback",
 		Session: ports.SessionRef{
 			Metadata: map[string]string{ports.MetadataKeyAgentSessionID: "019e950e-52e0-7411-961b-d380ca7e610f"},
 		},
@@ -221,9 +221,73 @@ func TestGetRestoreCommand(t *testing.T) {
 		t.Fatal("ok=false, want true")
 	}
 
-	want := []string{"pi", "--append-system-prompt", "restore inline wins", "--session", "019e950e-52e0-7411-961b-d380ca7e610f"}
+	want := []string{"pi", "--append-system-prompt", "restore inline fallback", "--session", "019e950e-52e0-7411-961b-d380ca7e610f"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("cmd = %#v, want %#v", cmd, want)
+	}
+}
+
+func TestCommandsKeepLargeSystemPromptInFile(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "AO instructions 中文.md")
+	prompt := strings.Repeat("Coordinate workers; preserve local work.\n", 2000)
+	if err := os.WriteFile(file, []byte(prompt), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, restore := range []bool{false, true} {
+		for _, inline := range []bool{false, true} {
+			name := "launch"
+			if restore {
+				name = "restore"
+			}
+			if inline {
+				name += "/with-inline-copy"
+			} else {
+				name += "/file-only"
+			}
+			t.Run(name, func(t *testing.T) {
+				p := &Plugin{resolvedBinary: "pi.cmd"}
+				var text string
+				if inline {
+					text = prompt
+				}
+				var cmd []string
+				var err error
+				want := []string{"pi.cmd", "--append-system-prompt", file}
+				if restore {
+					var ok bool
+					cmd, ok, err = p.GetRestoreCommand(context.Background(), ports.RestoreConfig{
+						SystemPrompt: text, SystemPromptFile: file,
+						Session: ports.SessionRef{Metadata: map[string]string{ports.MetadataKeyAgentSessionID: "native-id"}},
+					})
+					if err == nil && !ok {
+						t.Fatal("restore unavailable despite native session id")
+					}
+					want = append(want, "--session", "native-id")
+				} else {
+					cmd, err = p.GetLaunchCommand(context.Background(), ports.LaunchConfig{
+						SystemPrompt: text, SystemPromptFile: file,
+					})
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(cmd, want) {
+					t.Fatalf("large prompt must stay in its file; got %d command characters", len(strings.Join(cmd, " ")))
+				}
+			})
+		}
+	}
+}
+
+func TestGetRestoreCommandSystemPromptFileReadError(t *testing.T) {
+	p := &Plugin{resolvedBinary: "pi"}
+	_, ok, err := p.GetRestoreCommand(context.Background(), ports.RestoreConfig{
+		SystemPrompt:     "must not hide a missing prompt file",
+		SystemPromptFile: filepath.Join(t.TempDir(), "missing.md"),
+		Session:          ports.SessionRef{Metadata: map[string]string{ports.MetadataKeyAgentSessionID: "native-id"}},
+	})
+	if err == nil || ok {
+		t.Fatalf("restore = %v, %v, want unreadable prompt error", ok, err)
 	}
 }
 
