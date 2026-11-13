@@ -90,7 +90,7 @@ Only agents that are installed and ready on that computer are offered, and Chat 
 
 ## Project rules
 
-Use `agentRules` and `agentRulesFile` for worker instructions. Use `orchestratorRules` and `orchestratorRulesFile` for supervision-specific guidance. These are stored in the typed project config and injected into the appropriate session role.
+For repository-managed rules, add `AO-WORKER.md` or `AO-ORCHESTRATOR.md` at the registered project root. Orchestrator automatically injects each file into only its matching role; missing files are ignored. Existing `agentRules`/`agentRulesFile` and `orchestratorRules`/`orchestratorRulesFile` project settings remain supported and combine with the fixed-name file. See [project configuration](/configuration/projects#setup-and-rules) for the file loading lifecycle.
 
 <Callout type="info">
 	Orchestrator uses the provider CLI already installed and authenticated on your machine. Run `ao doctor` if a configured harness fails preflight.

@@ -117,7 +117,9 @@ The same command list runs on every platform. Use `sh` syntax on macOS/Linux and
 
 Cleanup steps use `preRemove`. They run in order after processes stop and before permanent worktree removal. They have no execution time limit unless you set one for a step (1 to 120 minutes); a step that runs out of time fails like any other. Daemon shutdown cancels them. A failed step preserves the worktree. Save a fix, then use **Retry cleanup** for terminated sessions. Dirty worktrees remain intact. Replacing an orchestrator is the exception: its cleanup gets 90 seconds, and Orchestrator removes the old worktree even if a step fails or runs out of time. Cleanup does not run on ordinary agent exit or app quit, and it excludes scratch workspaces.
 
-Use `agentRules` or `agentRulesFile` for worker instructions and `orchestratorRules` or `orchestratorRulesFile` for supervision instructions. If both fields for a role are set, Orchestrator combines the inline rules and file contents. Rules files are read when a session starts, so an edit applies to sessions started after it.
+For repository-managed rules, place `AO-WORKER.md` or `AO-ORCHESTRATOR.md` in the registered project root. Orchestrator reads each file automatically and injects it only into its matching role; either file may be absent. No project setting is needed. The files are read when Orchestrator builds a role's system prompt, so edits apply to sessions started or restored after the change, not to a running session.
+
+Existing `agentRules` and `agentRulesFile` settings still add worker rules; `orchestratorRules` and `orchestratorRulesFile` still add orchestrator rules. Orchestrator combines these configured rules with the matching fixed-name file when both are present.
 
 For example, these fields link local setup files, install dependencies, and load worker rules. This is a configuration fragment; keep any other existing fields when applying it:
 
