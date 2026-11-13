@@ -70,7 +70,7 @@ func TestBranchViewListsCommitsSinceDefaultMergeBase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := WorkspaceViewInfo{Kind: WorkspaceViewBranch, Name: "feature", TipSHA: tip, BaseSHA: base, BaseRef: "main", RangeMode: WorkspaceRangeSinceBase}
+	want := WorkspaceViewInfo{Kind: WorkspaceViewBranch, Name: "feature", TipSHA: tip, BaseSHA: base, BaseRef: "refs/heads/main", RangeMode: WorkspaceRangeSinceBase}
 	if history.View != want {
 		t.Fatalf("view = %+v, want %+v", history.View, want)
 	}
@@ -96,6 +96,30 @@ func TestBranchViewListsCommitsSinceDefaultMergeBase(t *testing.T) {
 	}
 	if got := runGit(t, repo, "status", "--porcelain"); got != status {
 		t.Fatalf("status = %q, want %q", got, status)
+	}
+}
+
+func TestBranchViewUsesUnpushedLocalBaseCommit(t *testing.T) {
+	repo := newWorkspaceRepo(t)
+	runGit(t, repo, "branch", "-M", "main")
+	remoteBase := gitHead(t, repo)
+	runGit(t, repo, "update-ref", "refs/remotes/origin/main", remoteBase)
+	localBase := commitWorkspaceFile(t, repo, "local-base.txt", "local only\n", "unpushed local base")
+	runGit(t, repo, "switch", "-c", "session")
+	taskTip := commitWorkspaceFile(t, repo, "task.txt", "task\n", "task change")
+	st := newFakeStore()
+	st.projects["proj"] = domain.ProjectRecord{ID: "proj", Path: repo, Config: domain.ProjectConfig{DefaultBranch: "refs/heads/main"}}
+	st.sessions["ao-1"] = domain.SessionRecord{ID: "ao-1", ProjectID: "proj", Metadata: domain.SessionMetadata{Branch: "session", WorkspacePath: repo}}
+
+	history, err := (&Service{store: st}).GetWorkspaceHistory(context.Background(), "ao-1", WorkspaceView{Branch: "session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if history.View.BaseSHA != localBase || history.View.BaseRef != "refs/heads/main" {
+		t.Fatalf("base = %s (%s), want unpushed local base %s (refs/heads/main); remote is %s", history.View.BaseSHA, history.View.BaseRef, localBase, remoteBase)
+	}
+	if history.View.TipSHA != taskTip || len(history.Commits) != 1 || history.Commits[0].Subject != "task change" {
+		t.Fatalf("task history = tip:%s commits:%+v, want only task commit after local base", history.View.TipSHA, history.Commits)
 	}
 }
 

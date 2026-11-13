@@ -157,7 +157,15 @@ func (m *Manager) completeAsyncChatSpawn(ctx context.Context, in asyncChatSpawn)
 	}
 	if in.preparation != nil {
 		ws, workspaceProject, err = m.awaitTaskPreparation(ctx, in.preparation)
-		if err != nil && ctx.Err() != nil {
+		if err != nil && (ctx.Err() != nil || errors.Is(err, errPreparedTaskBaseInvalidated)) {
+			if errors.Is(err, errPreparedTaskBaseInvalidated) && in.preparation.promoted {
+				in.preparation.cancel()
+				m.failAsyncChatSpawn(ctx, id, wrapSpawnStage(id, ErrWorkspaceCreate, err))
+				return
+			}
+			if errors.Is(err, errPreparedTaskBaseInvalidated) {
+				m.discardClaimedTaskPreparation(ctx, in.preparation)
+			}
 			in.preparation.cancel()
 			m.failAsyncChatSpawn(ctx, id, wrapSpawnStage(id, ErrWorkspaceCreate, err))
 			// The claimed preparation has no timer or cache entry. Keep owning its
@@ -175,9 +183,8 @@ func (m *Manager) completeAsyncChatSpawn(ctx context.Context, in asyncChatSpawn)
 	ctx = context.WithValue(ctx, spawnWorkspaceGateKey{}, releaseWorkspaceGate)
 	defer releaseWorkspaceGate()
 	if ws.Path == "" {
-		baseRefs := m.refreshDefaultBranchesBestEffort(ctx, in.project)
-		m.logAsyncChatSpawnStage(id, "default_branch_refresh", stageStarted)
-		progress.complete(ctx, domain.SessionProvisionStepFetch)
+		baseRefs := m.resolveWorkspaceBaseRefs(ctx, in.project)
+		m.logAsyncChatSpawnStage(id, "local_base_resolution", stageStarted)
 		stageStarted = time.Now()
 		ws, workspaceProject, err = m.createSessionWorkspace(ctx, in.project, in.cfg, id, in.branch, baseRefs)
 	} else {
@@ -356,9 +363,6 @@ func (p *provisionProgress) publish(ctx context.Context) {
 func provisionPlan(in asyncChatSpawn, reusePublishedWorkspace bool) []domain.SessionProvisionStepID {
 	var plan []domain.SessionProvisionStepID
 	if !reusePublishedWorkspace && (!in.retry || len(in.record.ProvisionSteps) == 0) {
-		if in.preparation == nil {
-			plan = append(plan, domain.SessionProvisionStepFetch)
-		}
 		plan = append(plan, domain.SessionProvisionStepWorktree)
 		if slices.ContainsFunc(in.project.Config.PostCreate, func(command string) bool {
 			return strings.TrimSpace(command) != ""
@@ -368,7 +372,7 @@ func provisionPlan(in asyncChatSpawn, reusePublishedWorkspace bool) []domain.Ses
 	}
 	if in.retry && len(in.record.ProvisionSteps) > 0 {
 		for _, step := range in.record.ProvisionSteps {
-			if step.ID != domain.SessionProvisionStepAgent && step.Status != domain.SessionProvisionStepDone {
+			if step.ID != domain.SessionProvisionStepAgent && step.ID != domain.SessionProvisionStepFetch && step.Status != domain.SessionProvisionStepDone {
 				plan = append(plan, step.ID)
 			}
 		}

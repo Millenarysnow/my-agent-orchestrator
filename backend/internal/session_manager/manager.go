@@ -420,28 +420,26 @@ type Manager struct {
 	modelCatalog interface {
 		Models(context.Context, string, string, bool) (ports.AgentModelCatalog, error)
 	}
-	lcm                         lifecycleRecorder
-	preview                     PreviewLifecycle
-	browser                     BrowserLifecycle
-	browserCapabilities         BrowserCapabilityIssuer
-	agentBrowserURL             string
-	agentBrowserToken           string
-	agentAccounts               ports.AgentAccountLaunchEnv
-	accountOverrideMu           sync.Mutex
-	accountOverrides            map[domain.SessionID]string
-	attachments                 *attachmentstore.Store
-	attachmentSuffix            func() (string, error)
-	dataDir                     string
-	runFilePath                 string
-	clock                       func() time.Time
-	reconcileWorkers            int
-	defaultBranchRefreshTimeout time.Duration
-	defaultBranchFetchMu        sync.Mutex
-	defaultBranchFetchedAt      map[string]time.Time
-	taskPreparationsMu          sync.Mutex
-	taskPreparations            map[domain.TaskPreparationToken]*taskPreparation
-	taskNamingSlots             chan struct{}
-	taskPreparationTTL          time.Duration
+	lcm                 lifecycleRecorder
+	preview             PreviewLifecycle
+	browser             BrowserLifecycle
+	browserCapabilities BrowserCapabilityIssuer
+	agentBrowserURL     string
+	agentBrowserToken   string
+	agentAccounts       ports.AgentAccountLaunchEnv
+	accountOverrideMu   sync.Mutex
+	accountOverrides    map[domain.SessionID]string
+	attachments         *attachmentstore.Store
+	attachmentSuffix    func() (string, error)
+	dataDir             string
+	runFilePath         string
+	clock               func() time.Time
+	reconcileWorkers    int
+
+	taskPreparationsMu sync.Mutex
+	taskPreparations   map[domain.TaskPreparationToken]*taskPreparation
+	taskNamingSlots    chan struct{}
+	taskPreparationTTL time.Duration
 	// Snapshot before the listener binds; background cleanup must never reclaim
 	// a preparation opened in this daemon after the listener is live.
 	startupTaskPreparations []domain.SessionRecord
@@ -811,10 +809,10 @@ type interfaceTransitionConfig struct {
 // Production sendConfirm bounds: 3 Enters total (1 from Send + 2 re-sends),
 // each given 2s to flip the session active, polled every 300ms.
 const (
-	sendConfirmPollInterval       = 300 * time.Millisecond
-	sendConfirmAttemptDeadline    = 2 * time.Second
-	sendConfirmMaxAttempts        = 3
-	defaultBranchRefreshTimeout   = 5 * time.Second
+	sendConfirmPollInterval    = 300 * time.Millisecond
+	sendConfirmAttemptDeadline = 2 * time.Second
+	sendConfirmMaxAttempts     = 3
+
 	promptDeliveryDeadlineReserve = 5 * time.Second
 )
 
@@ -898,25 +896,25 @@ func (m *Manager) WaitAgentSwitchWorkers(ctx context.Context) error {
 // time.Now when Deps.Clock is nil.
 func New(d Deps) *Manager {
 	m := &Manager{
-		runtime:                        d.Runtime,
-		agents:                         d.Agents,
-		workspace:                      d.Workspace,
-		store:                          d.Store,
-		defaults:                       d.Defaults,
-		chat:                           d.Chat,
-		lcm:                            d.Lifecycle,
-		preview:                        d.Preview,
-		browser:                        d.Browser,
-		browserCapabilities:            d.BrowserCapabilities,
-		agentBrowserURL:                d.AgentBrowserURL,
-		agentBrowserToken:              d.AgentBrowserToken,
-		attachments:                    attachmentstore.New(d.DataDir),
-		attachmentSuffix:               randomSuffix,
-		dataDir:                        d.DataDir,
-		runFilePath:                    strings.TrimSpace(d.RunFilePath),
-		clock:                          d.Clock,
-		reconcileWorkers:               d.ReconcileWorkers,
-		defaultBranchRefreshTimeout:    defaultBranchRefreshTimeout,
+		runtime:             d.Runtime,
+		agents:              d.Agents,
+		workspace:           d.Workspace,
+		store:               d.Store,
+		defaults:            d.Defaults,
+		chat:                d.Chat,
+		lcm:                 d.Lifecycle,
+		preview:             d.Preview,
+		browser:             d.Browser,
+		browserCapabilities: d.BrowserCapabilities,
+		agentBrowserURL:     d.AgentBrowserURL,
+		agentBrowserToken:   d.AgentBrowserToken,
+		attachments:         attachmentstore.New(d.DataDir),
+		attachmentSuffix:    randomSuffix,
+		dataDir:             d.DataDir,
+		runFilePath:         strings.TrimSpace(d.RunFilePath),
+		clock:               d.Clock,
+		reconcileWorkers:    d.ReconcileWorkers,
+
 		taskPreparations:               make(map[domain.TaskPreparationToken]*taskPreparation),
 		taskNamingSlots:                make(chan struct{}, 4),
 		asyncChatSpawns:                make(map[domain.SessionID]*asyncChatSpawnRun),
@@ -1242,7 +1240,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 		// preparation has finished publishing its worktree. Otherwise its late
 		// publication loses the provisioning-state fence and deletes the worktree.
 		if !asyncChat {
-			if _, _, err := m.awaitTaskPreparation(ctx, prep); err != nil && ctx.Err() != nil {
+			if _, _, err := m.awaitTaskPreparation(ctx, prep); err != nil && (ctx.Err() != nil || errors.Is(err, errPreparedTaskBaseInvalidated)) {
 				cleanupCtx, cancel := spawnRollbackContext(ctx)
 				m.discardClaimedTaskPreparation(cleanupCtx, prep)
 				cancel()
@@ -1311,7 +1309,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 	}
 
 	// An asynchronous Chat spawn stops here and answers the caller. Everything
-	// below — the remote refresh, the worktree, the controller — is the same
+	// below — local base resolution, the worktree, the controller — is the same
 	// work, run in the background while the user already has the session open.
 	// The attachments are named now (spawnAttachmentRefs is derived, not read
 	// from disk) so the opening prompt is complete before the files land.
@@ -1345,7 +1343,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 	var workspaceProject *ports.WorkspaceProjectInfo
 	if prep != nil {
 		ws, workspaceProject, err = m.awaitTaskPreparation(ctx, prep)
-		if err != nil && ctx.Err() != nil {
+		if err != nil && (ctx.Err() != nil || errors.Is(err, errPreparedTaskBaseInvalidated)) {
 			cleanupCtx, cancel := spawnRollbackContext(ctx)
 			m.discardClaimedTaskPreparation(cleanupCtx, prep)
 			cancel()
@@ -1354,7 +1352,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 		}
 	}
 	if ws.Path == "" {
-		baseRefs := m.refreshDefaultBranchesBestEffort(ctx, project)
+		baseRefs := m.resolveWorkspaceBaseRefs(ctx, project)
 		ws, workspaceProject, err = m.createSessionWorkspace(ctx, project, cfg, id, branch, baseRefs)
 	}
 	if err != nil {
@@ -1565,7 +1563,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 		metadata.LatestUserPromptAt = m.clock()
 	}
 	if projectKind == domain.ProjectKindSingleRepo {
-		metadata.DiffBaseSHA, metadata.DiffBaseRef = resolveSpawnDiffBase(ctx, ws.Path, ws.BaseRef)
+		metadata.DiffBaseSHA, metadata.DiffBaseRef = resolveWorkspaceDiffBase(ctx, ws, project.Config.WorktreeBaseBranch())
 	}
 	if cfg.AutomationRunID != nil {
 		rec.Metadata = metadata
@@ -1907,41 +1905,39 @@ func (m *Manager) loadProject(ctx context.Context, projectID domain.ProjectID) (
 	return row, nil
 }
 
-type defaultBranchRefreshTarget struct {
+type workspaceBaseTarget struct {
 	repoPath         string
 	configuredBranch string
-	resolved         ports.WorkspaceDefaultBranch
 }
 
-func (m *Manager) refreshDefaultBranchesBestEffort(ctx context.Context, project domain.ProjectRecord) map[string]string {
+func (m *Manager) resolveWorkspaceBaseRefs(ctx context.Context, project domain.ProjectRecord) map[string]string {
 	if project.Kind.WithDefault() == domain.ProjectKindScratch {
 		return nil
 	}
 	if strings.TrimSpace(project.Path) == "" {
 		return nil
 	}
-	refresher, ok := m.workspace.(ports.WorkspaceDefaultBranchRefresher)
+	resolver, ok := m.workspace.(ports.WorkspaceDefaultBranchRefresher)
 	if !ok {
 		return nil
 	}
 	baseRefs := make(map[string]string)
-	targets := []defaultBranchRefreshTarget{{
+	targets := []workspaceBaseTarget{{
 		repoPath: project.Path,
-		// Translate the automatic-default sentinel before handing it to the
-		// adapter. An empty branch tells the resolver to inspect this
-		// repository's own remote HEAD; "auto" is not a Git branch name.
+		// An empty branch tells the local resolver to use the repository's
+		// recorded default metadata or current local checkout.
 		configuredBranch: project.Config.WorktreeBaseBranch(),
 	}}
 	if project.Kind.WithDefault() == domain.ProjectKindWorkspace {
 		repos, err := m.store.ListWorkspaceRepos(ctx, project.ID)
 		if err != nil {
-			m.logger.Warn("spawn: workspace child repo lookup failed; continuing with root refresh only", "projectID", project.ID, "error", err)
+			m.logger.Warn("spawn: workspace child repo lookup failed; continuing with root base only", "projectID", project.ID, "error", err)
 		} else {
 			for _, repo := range repos {
 				if repo.GitStatus == domain.GitStatusNeedsInit {
 					continue
 				}
-				targets = append(targets, defaultBranchRefreshTarget{
+				targets = append(targets, workspaceBaseTarget{
 					repoPath:         filepath.Join(project.Path, filepath.FromSlash(repo.RelativePath)),
 					configuredBranch: repo.DefaultBranch,
 				})
@@ -1949,11 +1945,9 @@ func (m *Manager) refreshDefaultBranchesBestEffort(ctx context.Context, project 
 		}
 	}
 
-	// Resolve every canonical ref before starting network I/O. This preserves
-	// each repository's own inferred origin/HEAD even if an earlier fetch uses
-	// the entire shared refresh budget.
+	// Resolve each repository independently using local refs only.
 	for i := range targets {
-		resolved, err := refresher.ResolveDefaultBranch(ctx, targets[i].repoPath, targets[i].configuredBranch)
+		resolved, err := resolver.ResolveDefaultBranch(ctx, targets[i].repoPath, targets[i].configuredBranch)
 		if err != nil {
 			m.logger.Warn("spawn: default branch resolution failed; continuing with adapter fallback",
 				"projectID", project.ID,
@@ -1963,58 +1957,12 @@ func (m *Manager) refreshDefaultBranchesBestEffort(ctx context.Context, project 
 			)
 			continue
 		}
-		targets[i].resolved = resolved
 		if resolved.BaseRef != "" {
 			baseRefs[filepath.Clean(targets[i].repoPath)] = resolved.BaseRef
 		}
 	}
 
-	// One deadline covers the complete workspace refresh. A slow or offline
-	// repository cannot multiply spawn latency by the number of child repos.
-	fetchCtx, cancel := context.WithTimeout(ctx, m.defaultBranchRefreshTimeout)
-	defer cancel()
-	for _, target := range targets {
-		if target.resolved.BaseRef == "" {
-			continue
-		}
-		// A base fetched moments ago for another start of the same project is
-		// fresh enough; the refresh is best effort either way.
-		if m.defaultBranchFetchedRecently(target.repoPath, target.resolved.BaseRef) {
-			continue
-		}
-		if err := refresher.FetchDefaultBranch(fetchCtx, target.repoPath, target.resolved); err != nil {
-			m.logger.Warn("spawn: default branch refresh failed; continuing with local refs",
-				"projectID", project.ID,
-				"repoPath", target.repoPath,
-				"remote", target.resolved.Remote,
-				"branch", target.resolved.Branch,
-				"baseRef", target.resolved.BaseRef,
-				"error", err,
-			)
-		}
-	}
 	return baseRefs
-}
-
-// defaultBranchFetchWindow is how long a fetched base ref counts as current for
-// the next start of the same project.
-const defaultBranchFetchWindow = 30 * time.Second
-
-// defaultBranchFetchedRecently reports whether baseRef of repoPath was fetched
-// within defaultBranchFetchWindow, and otherwise records this fetch.
-func (m *Manager) defaultBranchFetchedRecently(repoPath, baseRef string) bool {
-	key := filepath.Clean(repoPath) + "\x00" + baseRef
-	now := m.clock()
-	m.defaultBranchFetchMu.Lock()
-	defer m.defaultBranchFetchMu.Unlock()
-	if at, ok := m.defaultBranchFetchedAt[key]; ok && now.Sub(at) < defaultBranchFetchWindow {
-		return true
-	}
-	if m.defaultBranchFetchedAt == nil {
-		m.defaultBranchFetchedAt = make(map[string]time.Time)
-	}
-	m.defaultBranchFetchedAt[key] = now
-	return false
 }
 
 func (m *Manager) createSessionWorkspace(ctx context.Context, project domain.ProjectRecord, cfg ports.SpawnConfig, id domain.SessionID, branch string, baseRefs map[string]string) (ports.WorkspaceInfo, *ports.WorkspaceProjectInfo, error) {
@@ -2073,10 +2021,9 @@ func (m *Manager) createSessionWorkspace(ctx context.Context, project domain.Pro
 			Name:         repo.Name,
 			RelativePath: repo.RelativePath,
 			RepoPath:     repoPath,
-			// Older rows may have captured the branch checked out during
-			// registration. Automatic adapter fallback ignores it, while BaseRef
-			// preserves the canonical target resolved before the refresh.
-			BaseBranch: "",
+			// Each child retains its own registered local base independently
+			// of the workspace root and the source checkout's later switches.
+			BaseBranch: repo.DefaultBranch,
 			BaseRef:    baseRefs[filepath.Clean(repoPath)],
 		})
 	}
@@ -2150,6 +2097,13 @@ func (m *Manager) createSessionWorkspace(ctx context.Context, project domain.Pro
 	return info.Root, &info, err
 }
 
+func resolveWorkspaceDiffBase(ctx context.Context, ws ports.WorkspaceInfo, configuredBase string) (string, string) {
+	if strings.HasPrefix(configuredBase, "refs/heads/") && ws.BaseSHA != "" {
+		return ws.BaseSHA, ws.BaseRef
+	}
+	return resolveSpawnDiffBase(ctx, ws.Path, ws.BaseRef)
+}
+
 func resolveSpawnDiffBase(ctx context.Context, root, defaultBranch string) (string, string) {
 	for _, ref := range spawnDiffBaseRefCandidates(defaultBranch) {
 		if sha, ok := spawnGitSingleLine(ctx, root, "merge-base", "HEAD", ref); ok {
@@ -2181,6 +2135,7 @@ func spawnDiffBaseRefCandidates(defaultBranch string) []string {
 		refs = append(refs, ref)
 	}
 	if !strings.HasPrefix(defaultBranch, "origin/") && !strings.HasPrefix(defaultBranch, "refs/") {
+		add("refs/heads/" + defaultBranch)
 		add("origin/" + defaultBranch)
 		add("refs/remotes/origin/" + defaultBranch)
 	}
@@ -5909,7 +5864,7 @@ func promptProjectContext(projectID domain.ProjectID, project domain.ProjectReco
 		ID:            id,
 		Name:          project.DisplayName,
 		Repo:          project.RepoOriginURL,
-		DefaultBranch: cfg.DefaultBranch,
+		DefaultBranch: strings.TrimPrefix(cfg.DefaultBranch, "refs/heads/"),
 		Path:          project.Path,
 
 		WorkersRequestReview: cfg.WorkersRequestReview,

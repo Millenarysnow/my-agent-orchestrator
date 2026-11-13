@@ -2415,9 +2415,9 @@ func TestAppendWorkspaceFilesWithCapEnforcesGlobalLimit(t *testing.T) {
 	}
 }
 
-func TestWorkspaceBaseRefCandidatesPreferRemoteDefault(t *testing.T) {
+func TestWorkspaceBaseRefCandidatesPreferLocalDefault(t *testing.T) {
 	got := workspaceBaseRefCandidates("main")
-	want := []string{"origin/main", "refs/remotes/origin/main", "main"}
+	want := []string{"refs/heads/main", "origin/main", "refs/remotes/origin/main", "main"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("workspace base candidates = %#v, want %#v", got, want)
 	}

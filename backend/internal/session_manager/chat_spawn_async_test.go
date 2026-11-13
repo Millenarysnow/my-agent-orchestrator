@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/gitworktree"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	browsersvc "github.com/aoagents/agent-orchestrator/backend/internal/service/browser"
@@ -1188,7 +1189,7 @@ func TestSpawnAsyncChat_PublishesStartChecklist(t *testing.T) {
 	m.browserCapabilities = browsersvc.NewAuthority()
 	m.workspace.(*fakeWorkspace).path = t.TempDir()
 	project := st.projects[string(chatTestProject)]
-	project.Config.PostCreate = []string{"true"}
+	project.Config.PostCreate = []string{"echo setup"}
 	st.projects[string(chatTestProject)] = project
 	deferred := deferredBackground(m)
 
@@ -1199,8 +1200,8 @@ func TestSpawnAsyncChat_PublishesStartChecklist(t *testing.T) {
 	(*deferred)[0]()
 
 	want := []domain.SessionProvisionStepID{
-		domain.SessionProvisionStepFetch, domain.SessionProvisionStepWorktree,
-		domain.SessionProvisionStepSetup, domain.SessionProvisionStepAgent,
+		domain.SessionProvisionStepWorktree, domain.SessionProvisionStepSetup,
+		domain.SessionProvisionStepAgent,
 	}
 	var running []domain.SessionProvisionStepID
 	for _, steps := range recorder.published {
@@ -1275,6 +1276,65 @@ func TestSpawnAsyncChat_PreparedWorktreeChecklistSkipsFetch(t *testing.T) {
 	want := []domain.SessionProvisionStepID{domain.SessionProvisionStepWorktree, domain.SessionProvisionStepAgent}
 	if got := provisionStepIDs(st.sessions[rec.ID].ProvisionSteps); !slices.Equal(got, want) {
 		t.Fatalf("steps = %q, want %q", got, want)
+	}
+}
+
+func TestSpawnAsyncChat_PreservesCommittedPreparedWorkspaceWhenBaseAdvances(t *testing.T) {
+	repo := newManagerGitRepo(t)
+	workspace, err := gitworktree.New(gitworktree.Options{
+		ManagedRoot:  t.TempDir(),
+		RepoResolver: gitworktree.StaticRepoResolver{"mer": repo},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	launcher := &recordingLauncher{}
+	m, st, _ := newChatManager(launcher)
+	m.workspace = workspace
+	deferred := deferredBackground(m)
+	project := st.projects[string(chatTestProject)]
+	project.Path = repo
+	project.Config.DefaultBranch = "main"
+	st.projects[string(chatTestProject)] = project
+
+	token, err := m.PrepareTaskWorkspace(context.Background(), project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	(*deferred)[0]()
+	prepared := st.sessions["mer-1"]
+	workspacePath := prepared.Metadata.WorkspacePath
+	if err := os.WriteFile(filepath.Join(workspacePath, "user-work.txt"), []byte("keep this commit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runManagerGit(t, workspacePath, "add", "user-work.txt")
+	runManagerGit(t, workspacePath, "commit", "-m", "user work")
+	userCommit := runManagerGit(t, workspacePath, "rev-parse", "HEAD")
+	runManagerGit(t, repo, "commit", "--allow-empty", "-m", "advance local base")
+
+	cfg := asyncChatSpawnConfig("do the thing")
+	cfg.TaskPreparation = token
+	rec, _, _, err := m.Spawn(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	(*deferred)[1]()
+
+	stored, ok := st.sessions[rec.ID]
+	if !ok || stored.IsTaskPreparation {
+		t.Fatalf("promoted task record = %+v, found=%v; want visible failed task", stored, ok)
+	}
+	if stored.ProvisionState != domain.SessionProvisionFailed || stored.Metadata.WorkspacePath != workspacePath {
+		t.Fatalf("task state/path = %q/%q, want failed with preserved path %q", stored.ProvisionState, stored.Metadata.WorkspacePath, workspacePath)
+	}
+	if got := runManagerGit(t, workspacePath, "rev-parse", "HEAD"); got != userCommit {
+		t.Fatalf("prepared workspace HEAD = %s, want preserved user commit %s", got, userCommit)
+	}
+	if _, err := os.Stat(filepath.Join(workspacePath, "user-work.txt")); err != nil {
+		t.Fatalf("preserved file is missing: %v", err)
+	}
+	if len(launcher.started) != 0 {
+		t.Fatal("agent started from a preparation with a stale base")
 	}
 }
 

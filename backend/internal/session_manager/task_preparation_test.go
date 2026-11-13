@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -468,6 +469,72 @@ func newGitTaskPreparationManager(t *testing.T) (*Manager, *fakeStore, *gitworkt
 	project.Config.DefaultBranch = "main"
 	st.projects["mer"] = project
 	return m, st, ws, repo
+}
+
+func TestTaskPreparationInvalidatesWhenLocalBaseAdvances(t *testing.T) {
+	m, st, _, repo := newGitTaskPreparationManager(t)
+	token, err := m.PrepareTaskWorkspace(context.Background(), st.projects["mer"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := st.sessions["mer-1"]
+	runManagerGit(t, repo, "commit", "--allow-empty", "-m", "advance local base")
+	want := runManagerGit(t, repo, "rev-parse", "HEAD")
+	spawned, _, _, err := m.Spawn(context.Background(), ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, TaskPreparation: token})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := runManagerGit(t, spawned.Metadata.WorkspacePath, "rev-parse", "HEAD"); got != want {
+		t.Fatalf("reused stale preparation %s: got=%s want=%s", old.Metadata.Branch, got, want)
+	}
+}
+
+func TestTaskPreparationInvalidatesWhenProjectBaseChanges(t *testing.T) {
+	m, st, _, repo := newGitTaskPreparationManager(t)
+	token, err := m.PrepareTaskWorkspace(context.Background(), st.projects["mer"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	runManagerGit(t, repo, "switch", "-c", "release/local")
+	runManagerGit(t, repo, "commit", "--allow-empty", "-m", "release only")
+	want := runManagerGit(t, repo, "rev-parse", "HEAD")
+	project := st.projects["mer"]
+	project.Config.DefaultBranch = "refs/heads/release/local"
+	st.projects["mer"] = project
+	spawned, _, _, err := m.Spawn(context.Background(), ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, TaskPreparation: token})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := runManagerGit(t, spawned.Metadata.WorkspacePath, "rev-parse", "HEAD"); got != want || spawned.Metadata.DiffBaseRef != "refs/heads/release/local" {
+		t.Fatalf("task base=%s ref=%s want=%s", got, spawned.Metadata.DiffBaseRef, want)
+	}
+}
+
+func TestTaskPreparationWithNewCommitIsPreservedAndNotStarted(t *testing.T) {
+	m, st, _, repo := newGitTaskPreparationManager(t)
+	token, err := m.PrepareTaskWorkspace(context.Background(), st.projects["mer"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared := st.sessions["mer-1"]
+	if err := os.WriteFile(filepath.Join(prepared.Metadata.WorkspacePath, "user-work.txt"), []byte("keep this commit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runManagerGit(t, prepared.Metadata.WorkspacePath, "add", "user-work.txt")
+	runManagerGit(t, prepared.Metadata.WorkspacePath, "commit", "-m", "user work")
+	userCommit := runManagerGit(t, prepared.Metadata.WorkspacePath, "rev-parse", "HEAD")
+	runManagerGit(t, repo, "commit", "--allow-empty", "-m", "advance local base")
+
+	_, _, _, err = m.Spawn(context.Background(), ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, TaskPreparation: token})
+	if err == nil || !strings.Contains(err.Error(), "prepared task has new commits; preserving its workspace") {
+		t.Fatalf("spawn error = %v, want preserved-preparation error", err)
+	}
+	if got := runManagerGit(t, repo, "rev-parse", "refs/heads/"+prepared.Metadata.Branch); got != userCommit {
+		t.Fatalf("prepared branch tip = %s, want preserved user commit %s", got, userCommit)
+	}
+	if _, ok := st.sessions[prepared.ID]; ok {
+		t.Fatal("unpromoted preparation row survived after its committed work was preserved")
+	}
 }
 
 func assertManagerBranchAbsent(t *testing.T, repo, branch string) {

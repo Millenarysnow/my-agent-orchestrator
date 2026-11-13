@@ -137,13 +137,11 @@ func ignoredCountArgs(worktree string) []string {
 }
 
 func configuredBaseRefCandidates(defaultBranch string) []string {
-	if strings.Contains(defaultBranch, "/") {
-		// A qualified default ("upstream/main") is used verbatim; git's refname
-		// disambiguation already falls back to refs/heads/<defaultBranch>.
+	if strings.HasPrefix(defaultBranch, "refs/") {
 		return []string{defaultBranch}
 	}
-	// The local head comes after origin/<defaultBranch> so remote-tracking
-	// still wins when present, but a remoteless repo can base new branches
-	// on its local default branch instead of failing BRANCH_NOT_FETCHED.
-	return []string{"origin/" + defaultBranch, "refs/heads/" + defaultBranch}
+	if strings.Contains(defaultBranch, "/") {
+		return []string{"refs/heads/" + defaultBranch, defaultBranch, "origin/" + defaultBranch}
+	}
+	return []string{"refs/heads/" + defaultBranch, "origin/" + defaultBranch}
 }

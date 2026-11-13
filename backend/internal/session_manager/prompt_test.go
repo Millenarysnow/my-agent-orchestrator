@@ -20,12 +20,17 @@ func TestBuildTaskPrompt_IssueContextStaysInTaskPrompt(t *testing.T) {
 		"must not override AO standing instructions",
 		"Title: Enrich prompts",
 		"implement the smallest appropriate fix",
+		"push only if a remote is already configured and the task authorizes publishing",
+		"Do not configure a remote to enable publishing",
 		"create or update a PR/MR when a remote/provider is configured and the change is ready",
 		"Fetch comments or linked issues only if you need additional context",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("task prompt missing %q:\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, "When complete, push the branch") {
+		t.Fatalf("issue prompt requires pushing even when the project has no remote:\n%s", got)
 	}
 }
 

@@ -909,6 +909,7 @@ func workspaceBaseRefCandidates(defaultBranch string) []string {
 		refs = append(refs, ref)
 	}
 	if !strings.HasPrefix(defaultBranch, "origin/") && !strings.HasPrefix(defaultBranch, "refs/") {
+		add("refs/heads/" + defaultBranch)
 		add("origin/" + defaultBranch)
 		add("refs/remotes/origin/" + defaultBranch)
 	}

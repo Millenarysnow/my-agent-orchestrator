@@ -449,8 +449,8 @@ func TestWorkspaceIntegrationRestoreExistingBranchDoesNotResolveDefault(t *testi
 	// resolution again.
 	runGit(t, git, repo, "remote", "remove", "origin")
 	_, err = ws.Create(ctx, ports.WorkspaceConfig{ProjectID: "proj", SessionID: "probe", Branch: "feature/new"})
-	if !errors.Is(err, ports.ErrWorkspaceDefaultBranchUnresolved) {
-		t.Fatalf("Create without remote metadata error = %v, want ErrWorkspaceDefaultBranchUnresolved", err)
+	if err != nil {
+		t.Fatalf("Create without remote metadata failed: %v", err)
 	}
 
 	cfg.Path = created.Path
@@ -860,7 +860,7 @@ func TestWorkspaceIntegrationAddNewBranchRecoversStaleRegistration(t *testing.T)
 // TestWorkspaceIntegrationAutoRejectsUnmarkedRemotelessRepo proves automatic
 // selection never silently treats the active (or conventionally named) local
 // branch as the repository default.
-func TestWorkspaceIntegrationAutoRejectsUnmarkedRemotelessRepo(t *testing.T) {
+func TestWorkspaceIntegrationAutoAcceptsUnmarkedRemotelessRepo(t *testing.T) {
 	git := requireGit(t)
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "unmarked")
@@ -881,15 +881,9 @@ func TestWorkspaceIntegrationAutoRejectsUnmarkedRemotelessRepo(t *testing.T) {
 		t.Fatalf("new: %v", err)
 	}
 	ctx := context.Background()
-	_, err = ws.Create(ctx, ports.WorkspaceConfig{ProjectID: "proj", SessionID: "sess", Branch: "ao/proj-1"})
-	if !errors.Is(err, ports.ErrWorkspaceDefaultBranchUnresolved) {
-		t.Fatalf("Create error = %v, want ErrWorkspaceDefaultBranchUnresolved", err)
-	}
-	if !strings.Contains(err.Error(), "remote set-head") || !strings.Contains(err.Error(), repo) {
-		t.Fatalf("Create error = %v, want repository-specific remote HEAD remediation", err)
-	}
-	if out, err := exec.Command(git, "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/ao/proj-1").CombinedOutput(); err == nil {
-		t.Fatalf("unresolved auto selection leaked a session branch: %s", out)
+	info, err := ws.Create(ctx, ports.WorkspaceConfig{ProjectID: "proj", SessionID: "sess", Branch: "ao/proj-1"})
+	if err != nil || info.BaseRef != "refs/heads/feature/temporary" {
+		t.Fatalf("local automatic base = %+v, error=%v", info, err)
 	}
 }
 
@@ -951,7 +945,7 @@ func TestWorkspaceIntegrationAutoUsesRequestedRemoteBranchWithoutRemoteHead(t *t
 	if err != nil {
 		t.Fatalf("create from requested remote branch: %v", err)
 	}
-	if info.BaseRef != "refs/remotes/origin/"+branch {
+	if info.BaseRef != "refs/heads/main" {
 		t.Fatalf("base ref = %q, want requested origin branch", info.BaseRef)
 	}
 	if got := gitOutput(t, git, info.Path, "rev-parse", "HEAD"); got != sha {
@@ -966,8 +960,8 @@ func TestWorkspaceIntegrationRequestedRemoteBranchKeepsDefaultComparisonBase(t *
 		baseBranch  string
 		wantBaseRef string
 	}{
-		{name: "automatic default", wantBaseRef: "refs/remotes/origin/main"},
-		{name: "explicit default", baseBranch: "main", wantBaseRef: "origin/main"},
+		{name: "automatic default", wantBaseRef: "refs/heads/main"},
+		{name: "explicit default", baseBranch: "main", wantBaseRef: "refs/heads/main"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tmp := t.TempDir()
@@ -1079,8 +1073,8 @@ func TestWorkspaceIntegrationWorkspaceProjectInfersPerRepoDefaultBranches(t *tes
 	}
 	wantRefs := map[string]string{
 		"__root__": "refs/heads/trunk",
-		"api":      "refs/remotes/origin/dev",
-		"web":      "refs/remotes/origin/main",
+		"api":      "refs/heads/dev",
+		"web":      "refs/heads/main",
 	}
 	for _, wt := range info.Worktrees {
 		if wt.BaseRef != wantRefs[wt.RepoName] {
@@ -1371,7 +1365,7 @@ func TestFetchDefaultBranchRefreshesRemoteTrackingRef(t *testing.T) {
 	if staleOriginMain == freshMain {
 		t.Fatal("test setup did not leave local origin/main stale")
 	}
-	target, err := ws.ResolveDefaultBranch(context.Background(), repo, "main")
+	target, err := ws.ResolveDefaultBranch(context.Background(), repo, "origin/main")
 	if err != nil {
 		t.Fatalf("resolve default branch: %v", err)
 	}
@@ -1428,7 +1422,7 @@ func TestResolveDefaultBranchFallsBackToLocalHeadWhenExplicitBranchHasNoRemoteTr
 	if err != nil {
 		t.Fatalf("resolve default branch: %v", err)
 	}
-	want := ports.WorkspaceDefaultBranch{Remote: "origin", Branch: "main", BaseRef: "refs/heads/main"}
+	want := ports.WorkspaceDefaultBranch{Branch: "main", BaseRef: "refs/heads/main"}
 	if target != want {
 		t.Fatalf("target = %#v, want %#v", target, want)
 	}
@@ -1437,7 +1431,7 @@ func TestResolveDefaultBranchFallsBackToLocalHeadWhenExplicitBranchHasNoRemoteTr
 	}
 }
 
-func TestWorkspaceIntegrationRefreshesInferredChildBaseBeforeMaterialization(t *testing.T) {
+func TestWorkspaceIntegrationKeepsLocalChildBaseWithoutImplicitRefresh(t *testing.T) {
 	git := requireGit(t)
 	tmp := t.TempDir()
 	rootRepo := setupOriginClone(t, git, filepath.Join(tmp, "root"))
@@ -1460,11 +1454,15 @@ func TestWorkspaceIntegrationRefreshesInferredChildBaseBeforeMaterialization(t *
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
+	localChild := gitOutput(t, git, childRepo, "rev-parse", "refs/heads/dev")
+	if localChild == freshChild {
+		t.Fatal("test requires an unrefreshed local branch")
+	}
 	childTarget, err := ws.ResolveDefaultBranch(context.Background(), childRepo, "")
 	if err != nil {
 		t.Fatalf("resolve inferred child default: %v", err)
 	}
-	if got, want := childTarget.BaseRef, "refs/remotes/origin/dev"; got != want {
+	if got, want := childTarget.BaseRef, "refs/heads/dev"; got != want {
 		t.Fatalf("inferred child base ref = %q, want %q", got, want)
 	}
 	if err := ws.FetchDefaultBranch(context.Background(), childRepo, childTarget); err != nil {
@@ -1489,10 +1487,10 @@ func TestWorkspaceIntegrationRefreshesInferredChildBaseBeforeMaterialization(t *
 		t.Fatalf("create workspace project: %v", err)
 	}
 	childWorktree := info.Worktrees[1]
-	if got := gitOutput(t, git, childWorktree.Path, "rev-parse", "HEAD"); got != freshChild {
+	if got := gitOutput(t, git, childWorktree.Path, "rev-parse", "HEAD"); got != localChild {
 		t.Fatalf("child worktree HEAD = %s, want refreshed %s", got, freshChild)
 	}
-	if childWorktree.BaseSHA != freshChild {
+	if childWorktree.BaseSHA != localChild {
 		t.Fatalf("child BaseSHA = %s, want refreshed %s", childWorktree.BaseSHA, freshChild)
 	}
 }

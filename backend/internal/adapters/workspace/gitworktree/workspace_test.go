@@ -54,13 +54,13 @@ func TestCommandArgs(t *testing.T) {
 
 func TestConfiguredBaseRefCandidates(t *testing.T) {
 	got := configuredBaseRefCandidates("main")
-	want := []string{"origin/main", "refs/heads/main"}
+	want := []string{"refs/heads/main", "origin/main"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("candidates = %#v, want %#v", got, want)
 	}
 
 	got = configuredBaseRefCandidates("upstream/main")
-	want = []string{"upstream/main"}
+	want = []string{"refs/heads/upstream/main", "upstream/main", "origin/upstream/main"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("qualified candidates = %#v, want %#v", got, want)
 	}
@@ -1194,15 +1194,15 @@ func TestResolveWorktreeRefsInfersRepoDefaultBranchWhenUnset(t *testing.T) {
 			return []byte("origin\n"), nil
 		case strings.Contains(joined, "config --get checkout.defaultRemote"):
 			return nil, commandError{args: args, err: exitOne}
-		case strings.Contains(joined, "ls-remote --symref -- origin HEAD"):
-			return []byte("ref: refs/heads/master\tHEAD\nabc123\tHEAD\n"), nil
+		case strings.Contains(joined, "symbolic-ref --quiet refs/remotes/origin/HEAD"):
+			return []byte("refs/remotes/origin/master\n"), nil
 		case strings.Contains(joined, "check-ref-format --branch master"):
 			return nil, nil
 		case strings.Contains(joined, " fetch "):
 			return nil, nil
 		case strings.Contains(joined, "symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/master"):
 			return nil, nil
-		case strings.Contains(joined, "refs/remotes/origin/master"):
+		case strings.Contains(joined, "refs/remotes/origin/master"), strings.Contains(joined, "refs/heads/master"):
 			return []byte("sha\n"), nil
 		case strings.Contains(joined, "rev-parse --verify"):
 			return nil, commandError{args: args, err: exitOne}
@@ -1210,11 +1210,11 @@ func TestResolveWorktreeRefsInfersRepoDefaultBranchWhenUnset(t *testing.T) {
 			return nil, nil
 		}
 	}
-	refs, err := ws.resolveWorktreeRefs(context.Background(), context.Background(), "/repo/child", "ao/work", "")
+	refs, err := ws.resolveWorktreeRefs(context.Background(), "/repo/child", "ao/work", "")
 	if err != nil {
 		t.Fatalf("resolveWorktreeRefs err = %v", err)
 	}
-	if refs.seedRef != "refs/remotes/origin/master" || refs.baseRef != "refs/remotes/origin/master" {
+	if refs.seedRef != "refs/heads/master" || refs.baseRef != "refs/heads/master" {
 		t.Fatalf("refs = %#v, want child default for both seed and base", refs)
 	}
 }

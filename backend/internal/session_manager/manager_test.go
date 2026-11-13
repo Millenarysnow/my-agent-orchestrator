@@ -2124,8 +2124,8 @@ func TestSpawnRecordsDiffBaseForSingleRepoSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantBase := strings.TrimSpace(runManagerGit(t, repo, "rev-parse", "main"))
-	if rec.Metadata.DiffBaseSHA != wantBase || rec.Metadata.DiffBaseRef != "main" {
-		t.Fatalf("spawn diff base = sha:%q ref:%q, want %s main", rec.Metadata.DiffBaseSHA, rec.Metadata.DiffBaseRef, wantBase)
+	if rec.Metadata.DiffBaseSHA != wantBase || rec.Metadata.DiffBaseRef != "refs/heads/main" {
+		t.Fatalf("spawn diff base = sha:%q ref:%q, want %s refs/heads/main", rec.Metadata.DiffBaseSHA, rec.Metadata.DiffBaseRef, wantBase)
 	}
 }
 
@@ -2156,7 +2156,7 @@ func TestSpawnAutoRecordsResolvedDiffBaseInsteadOfFeatureTip(t *testing.T) {
 	}
 }
 
-func TestSpawnRecordsRemoteTrackingDiffBaseWhenLocalDefaultBranchLags(t *testing.T) {
+func TestSpawnPrefersLocalDiffBaseWhenRemoteTrackingBranchIsAhead(t *testing.T) {
 	m, st, _, ws := newManager()
 	repo := newManagerGitRepo(t)
 	localMain := strings.TrimSpace(runManagerGit(t, repo, "rev-parse", "HEAD"))
@@ -2179,14 +2179,14 @@ func TestSpawnRecordsRemoteTrackingDiffBaseWhenLocalDefaultBranchLags(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rec.Metadata.DiffBaseSHA != originMain || rec.Metadata.DiffBaseRef != "origin/main" {
-		t.Fatalf("spawn diff base = sha:%q ref:%q, want %s origin/main", rec.Metadata.DiffBaseSHA, rec.Metadata.DiffBaseRef, originMain)
+	if rec.Metadata.DiffBaseSHA != localMain || rec.Metadata.DiffBaseRef != "refs/heads/main" {
+		t.Fatalf("spawn diff base = sha:%q ref:%q, want local %s refs/heads/main (remote is %s)", rec.Metadata.DiffBaseSHA, rec.Metadata.DiffBaseRef, localMain, originMain)
 	}
 }
 
-func TestSpawnDiffBaseRefCandidatesPreferRemoteTrackingDefault(t *testing.T) {
+func TestSpawnDiffBaseRefCandidatesPreferLocalDefault(t *testing.T) {
 	got := spawnDiffBaseRefCandidates("main")
-	want := []string{"origin/main", "refs/remotes/origin/main", "main"}
+	want := []string{"refs/heads/main", "origin/main", "refs/remotes/origin/main", "main"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("spawn diff candidates = %#v, want %#v", got, want)
 	}
@@ -3907,11 +3907,11 @@ func TestSpawn_WorkspaceProjectRecordsRootAndChildWorktrees(t *testing.T) {
 	if want := filepath.Join(projectPath, "apps", "web"); ws.lastProjectCfg.Repos[1].RepoPath != want {
 		t.Fatalf("web repo path = %q, want %q", ws.lastProjectCfg.Repos[1].RepoPath, want)
 	}
-	if got := ws.lastProjectCfg.Repos[0].BaseBranch; got != "" {
-		t.Fatalf("api base branch = %q, want empty so the adapter verifies the repo default", got)
+	if got := ws.lastProjectCfg.Repos[0].BaseBranch; got != "dev" {
+		t.Fatalf("api base branch = %q, want registered local base dev", got)
 	}
-	if got := ws.lastProjectCfg.Repos[1].BaseBranch; got != "" {
-		t.Fatalf("web base branch = %q, want empty so the adapter verifies the repo default", got)
+	if got := ws.lastProjectCfg.Repos[1].BaseBranch; got != "main" {
+		t.Fatalf("web base branch = %q, want registered local base main", got)
 	}
 	rows := st.worktrees["mer-1"]
 	if len(rows) != 3 {
@@ -5684,7 +5684,7 @@ func TestPromptProjectContextOmitsAutomaticBranchSentinel(t *testing.T) {
 	}
 }
 
-func TestSpawn_FetchesDefaultBranchBeforeCreatingWorkerWorktree(t *testing.T) {
+func TestSpawn_ResolvesBaseWithoutFetchingBeforeCreatingWorkerWorktree(t *testing.T) {
 	m, st, _, ws := newManager()
 	cfg := testRoleAgents()
 	cfg.DefaultBranch = "main"
@@ -5696,18 +5696,18 @@ func TestSpawn_FetchesDefaultBranchBeforeCreatingWorkerWorktree(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got, want := ws.fetches, []fetchDefaultBranchCall{{repoPath: "/repo/mer", remote: "origin", branch: "main", baseRef: "refs/remotes/origin/main"}}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("fetches = %#v, want %#v", got, want)
+	if len(ws.fetches) != 0 {
+		t.Fatalf("local spawn fetched a remote: %#v", ws.fetches)
 	}
 	if got, want := ws.lastCfg.BaseRef, "refs/remotes/origin/main"; got != want {
 		t.Fatalf("create base ref = %q, want %q", got, want)
 	}
-	if got, want := calls[:2], []string{"FetchDefaultBranch:origin/main", "Create"}; !reflect.DeepEqual(got, want) {
+	if got, want := calls, []string{"Create"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("workspace call order = %#v, want %#v", calls, want)
 	}
 }
 
-func TestSpawn_FetchesWorkspaceChildDefaultBranchesBeforeCreatingProject(t *testing.T) {
+func TestSpawn_ResolvesWorkspaceChildBasesWithoutFetching(t *testing.T) {
 	m, st, _, ws := newManager()
 	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Path: "/repo/mer", Kind: domain.ProjectKindWorkspace, Config: testRoleAgents()}
 	st.workspaceRepo["mer"] = []domain.WorkspaceRepoRecord{{Name: "api", RelativePath: "api", DefaultBranch: "release/2026"}}
@@ -5715,12 +5715,8 @@ func TestSpawn_FetchesWorkspaceChildDefaultBranchesBeforeCreatingProject(t *test
 	if _, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker}); err != nil {
 		t.Fatal(err)
 	}
-	want := []fetchDefaultBranchCall{
-		{repoPath: "/repo/mer", remote: "origin", branch: "main", baseRef: "refs/remotes/origin/main"},
-		{repoPath: filepath.Join("/repo/mer", "api"), remote: "origin", branch: "release/2026", baseRef: "refs/remotes/origin/release/2026"},
-	}
-	if !reflect.DeepEqual(ws.fetches, want) {
-		t.Fatalf("fetches = %#v, want %#v", ws.fetches, want)
+	if len(ws.fetches) != 0 {
+		t.Fatalf("local workspace fetched a remote: %#v", ws.fetches)
 	}
 	if got, want := ws.resolves[0], (resolveDefaultBranchCall{repoPath: "/repo/mer", configuredBranch: ""}); got != want {
 		t.Fatalf("root resolution = %#v, want %#v", got, want)
@@ -5730,7 +5726,7 @@ func TestSpawn_FetchesWorkspaceChildDefaultBranchesBeforeCreatingProject(t *test
 	}
 }
 
-func TestSpawn_InfersEmptyWorkspaceChildDefaultBeforeFetchAndCreate(t *testing.T) {
+func TestSpawn_InfersEmptyWorkspaceChildDefaultBeforeLocalCreate(t *testing.T) {
 	m, st, _, ws := newManager()
 	childPath := filepath.Join("/repo/mer", "api")
 	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Path: "/repo/mer", Kind: domain.ProjectKindWorkspace, Config: testRoleAgents()}
@@ -5746,8 +5742,8 @@ func TestSpawn_InfersEmptyWorkspaceChildDefaultBeforeFetchAndCreate(t *testing.T
 	if got, want := ws.resolves[1], (resolveDefaultBranchCall{repoPath: childPath, configuredBranch: ""}); got != want {
 		t.Fatalf("child resolution = %#v, want %#v", got, want)
 	}
-	if got, want := ws.fetches[1], (fetchDefaultBranchCall{repoPath: childPath, remote: "origin", branch: "dev", baseRef: "refs/remotes/origin/dev"}); got != want {
-		t.Fatalf("child fetch = %#v, want %#v", got, want)
+	if len(ws.fetches) != 0 {
+		t.Fatalf("local spawn fetched a remote: %#v", ws.fetches)
 	}
 	if got, want := ws.lastProjectCfg.Repos[0].BaseRef, "refs/remotes/origin/dev"; got != want {
 		t.Fatalf("child create base ref = %q, want %q", got, want)
@@ -5764,7 +5760,7 @@ func TestSpawn_InfersEmptyWorkspaceChildDefaultBeforeFetchAndCreate(t *testing.T
 	}
 }
 
-func TestSpawn_SkipsNeedsInitWorkspaceChildrenDuringRefreshAndCreate(t *testing.T) {
+func TestSpawn_SkipsNeedsInitWorkspaceChildrenDuringLocalResolutionAndCreate(t *testing.T) {
 	m, st, _, ws := newManager()
 	projectPath := t.TempDir()
 	if err := os.Mkdir(filepath.Join(projectPath, "assets"), 0o755); err != nil {
@@ -5784,8 +5780,8 @@ func TestSpawn_SkipsNeedsInitWorkspaceChildrenDuringRefreshAndCreate(t *testing.
 		t.Fatal(err)
 	}
 
-	if got, want := len(ws.fetches), 2; got != want {
-		t.Fatalf("fetch calls = %d, want root plus ready child (%d)", got, want)
+	if got, want := len(ws.resolves), 2; got != want {
+		t.Fatalf("resolution calls = %d, want root plus ready child (%d)", got, want)
 	}
 	if got, want := len(ws.lastProjectCfg.Repos), 1; got != want {
 		t.Fatalf("materialized child configs = %d, want only ready child (%d)", got, want)
@@ -5801,35 +5797,34 @@ func TestSpawn_SkipsNeedsInitWorkspaceChildrenDuringRefreshAndCreate(t *testing.
 	}
 }
 
-func TestRefreshDefaultBranchesUsesOneOverallFetchBudget(t *testing.T) {
+func TestResolveWorkspaceBasesNeverUsesNetwork(t *testing.T) {
 	m, st, _, ws := newManager()
 	project := domain.ProjectRecord{ID: "mer", Path: "/repo/mer", Kind: domain.ProjectKindWorkspace, Config: testRoleAgents()}
 	for i := 0; i < 5; i++ {
 		name := fmt.Sprintf("child-%d", i)
 		st.workspaceRepo["mer"] = append(st.workspaceRepo["mer"], domain.WorkspaceRepoRecord{Name: name, RelativePath: name, DefaultBranch: "main"})
 	}
-	m.defaultBranchRefreshTimeout = 25 * time.Millisecond
 	ws.fetchFunc = func(ctx context.Context, _ string, _ ports.WorkspaceDefaultBranch) error {
-		<-ctx.Done()
-		return ctx.Err()
+		t.Fatal("local base resolution attempted a fetch")
+		return nil
 	}
 
 	started := time.Now()
-	baseRefs := m.refreshDefaultBranchesBestEffort(context.Background(), project)
+	baseRefs := m.resolveWorkspaceBaseRefs(context.Background(), project)
 	elapsed := time.Since(started)
 
 	if elapsed > 250*time.Millisecond {
-		t.Fatalf("workspace refresh took %s, want one shared 25ms budget", elapsed)
+		t.Fatalf("local workspace base resolution took %s, want it to remain bounded", elapsed)
 	}
-	if got, want := len(ws.fetches), 6; got != want {
-		t.Fatalf("fetch calls = %d, want root plus five children (%d)", got, want)
+	if got, want := len(ws.resolves), 6; got != want {
+		t.Fatalf("resolution calls = %d, want root plus five children (%d)", got, want)
 	}
 	if got, want := len(baseRefs), 6; got != want {
 		t.Fatalf("resolved base refs = %d, want root plus five children (%d)", got, want)
 	}
 }
 
-func TestSpawn_FetchesQualifiedDefaultBranchRemote(t *testing.T) {
+func TestSpawn_UsesQualifiedDefaultBranchCacheWithoutFetching(t *testing.T) {
 	m, st, _, ws := newManager()
 	cfg := testRoleAgents()
 	cfg.DefaultBranch = "upstream/main"
@@ -5845,15 +5840,15 @@ func TestSpawn_FetchesQualifiedDefaultBranchRemote(t *testing.T) {
 	if got, want := ws.resolves, []resolveDefaultBranchCall{{repoPath: "/repo/mer", configuredBranch: "upstream/main"}}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("resolutions = %#v, want %#v", got, want)
 	}
-	if got, want := ws.fetches, []fetchDefaultBranchCall{{repoPath: "/repo/mer", remote: "upstream", branch: "main", baseRef: "refs/remotes/upstream/main"}}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("fetches = %#v, want %#v", got, want)
+	if len(ws.fetches) != 0 {
+		t.Fatalf("local spawn fetched a remote: %#v", ws.fetches)
 	}
 	if got, want := ws.lastCfg.BaseRef, "refs/remotes/upstream/main"; got != want {
 		t.Fatalf("create base ref = %q, want %q", got, want)
 	}
 }
 
-func TestSpawn_SlashDefaultBranchWithoutKnownRemoteFetchesFromOrigin(t *testing.T) {
+func TestSpawn_SlashDefaultBranchResolvesLocally(t *testing.T) {
 	m, st, _, ws := newManager()
 	cfg := testRoleAgents()
 	cfg.DefaultBranch = "release/2026"
@@ -5866,12 +5861,12 @@ func TestSpawn_SlashDefaultBranchWithoutKnownRemoteFetchesFromOrigin(t *testing.
 	if got, want := ws.resolves, []resolveDefaultBranchCall{{repoPath: "/repo/mer", configuredBranch: "release/2026"}}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("resolutions = %#v, want %#v", got, want)
 	}
-	if got, want := ws.fetches, []fetchDefaultBranchCall{{repoPath: "/repo/mer", remote: "origin", branch: "release/2026", baseRef: "refs/remotes/origin/release/2026"}}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("fetches = %#v, want %#v", got, want)
+	if len(ws.fetches) != 0 {
+		t.Fatalf("local spawn fetched a remote: %#v", ws.fetches)
 	}
 }
 
-func TestSpawn_DefaultBranchFetchFailureDoesNotBlockWorkerSpawn(t *testing.T) {
+func TestSpawn_OfflineRemoteDoesNotBlockWorkerSpawn(t *testing.T) {
 	m, st, _, ws := newManager()
 	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Path: "/repo/mer", Config: testRoleAgents()}
 	ws.fetchErr = errors.New("network unavailable")
@@ -5879,8 +5874,8 @@ func TestSpawn_DefaultBranchFetchFailureDoesNotBlockWorkerSpawn(t *testing.T) {
 	if _, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker}); err != nil {
 		t.Fatal(err)
 	}
-	if len(ws.fetches) != 1 {
-		t.Fatalf("fetches = %d, want 1", len(ws.fetches))
+	if len(ws.fetches) != 0 {
+		t.Fatalf("fetches = %d, want none", len(ws.fetches))
 	}
 	if ws.lastCfg.Branch != "ao/mer-1/root" {
 		t.Fatalf("created branch = %q, want ao/mer-1/root", ws.lastCfg.Branch)
@@ -5991,7 +5986,7 @@ func TestSpawnWorker_IssueWithoutPromptGetsFallbackTaskPrompt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := "Work on issue 2272.\n\nIssue details were not pre-fetched. Start by reading the issue from the tracker, then inspect the relevant code and tests. Implement the smallest appropriate fix and run focused verification. When complete, push the branch. If this issue comes from GitHub, GitLab, or another provider, create or update a PR/MR when a remote/provider is configured and the change is ready, and link the issue."
+	want := "Work on issue 2272.\n\nIssue details were not pre-fetched. Start by reading the issue from the tracker, then inspect the relevant code and tests. Implement the smallest appropriate fix and run focused verification. When complete, push only if a remote is already configured and the task authorizes publishing; otherwise verify locally and report the result. Do not configure a remote to enable publishing. If this issue comes from GitHub, GitLab, or another provider, create or update a PR/MR when a remote/provider is configured and the change is ready, and link the issue."
 	if agent.lastLaunch.Prompt != want {
 		t.Fatalf("launch prompt = %q, want %q", agent.lastLaunch.Prompt, want)
 	}

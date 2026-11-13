@@ -15,6 +15,8 @@ import (
 const defaultTaskPreparationTTL = 5 * time.Minute
 const maxTaskPreparationsPerProject = 2
 
+var errPreparedTaskBaseInvalidated = errors.New("prepared task base changed")
+
 // taskPreparation is the daemon-owned speculative worktree behind one opaque
 // modal token. The session row reserves the final id and stays hidden until a
 // spawn claims it.
@@ -87,7 +89,7 @@ func (m *Manager) PrepareTaskWorkspace(ctx context.Context, project domain.Proje
 
 func (m *Manager) createTaskPreparation(ctx context.Context, prep *taskPreparation) {
 	releaseWorkspaceGate := m.acquireWorkspaceGate(domain.ProjectID(prep.project.ID))
-	baseRefs := m.refreshDefaultBranchesBestEffort(ctx, prep.project)
+	baseRefs := m.resolveWorkspaceBaseRefs(ctx, prep.project)
 	ws, workspaceProject, err := m.createSessionWorkspace(ctx, prep.project, ports.SpawnConfig{
 		ProjectID:       domain.ProjectID(prep.project.ID),
 		Kind:            domain.KindWorker,
@@ -175,7 +177,68 @@ func (m *Manager) awaitTaskPreparation(ctx context.Context, prep *taskPreparatio
 	case <-ctx.Done():
 		return ports.WorkspaceInfo{}, nil, ctx.Err()
 	}
+	if prep.err == nil && prep.workspace.Path != "" {
+		current, err := m.loadProject(ctx, domain.ProjectID(prep.project.ID))
+		if err != nil {
+			return ports.WorkspaceInfo{}, nil, err
+		}
+		if !m.preparedTaskBaseMatches(ctx, prep, current) {
+			untouched := func(path, sha string) bool {
+				if sha == "" {
+					return true
+				}
+				head, ok := spawnGitSingleLine(ctx, path, "rev-parse", "HEAD")
+				return ok && head == sha
+			}
+			if !untouched(prep.workspace.Path, prep.workspace.BaseSHA) {
+				return ports.WorkspaceInfo{}, nil, fmt.Errorf("%w: prepared task has new commits; preserving its workspace", errPreparedTaskBaseInvalidated)
+			}
+			if prep.workspaceProject != nil {
+				for _, repo := range prep.workspaceProject.Worktrees {
+					if !untouched(repo.Path, repo.CreationSHA) {
+						return ports.WorkspaceInfo{}, nil, fmt.Errorf("%w: prepared task has new commits; preserving its workspace", errPreparedTaskBaseInvalidated)
+					}
+				}
+			}
+			// Reclaim only through the normal preparation protections. A dirty
+			// worktree or a branch with later commits must never be discarded.
+			if err := m.destroyPreparedWorkspace(ctx, prep.workspace, prep.workspaceProject); err != nil {
+				return ports.WorkspaceInfo{}, nil, fmt.Errorf("%w: preserve stale prepared workspace: %w", errPreparedTaskBaseInvalidated, err)
+			}
+			if err := m.deletePreparedBranches(ctx, prep.workspace, prep.workspaceProject); err != nil {
+				return ports.WorkspaceInfo{}, nil, fmt.Errorf("%w: remove stale prepared branches: %w", errPreparedTaskBaseInvalidated, err)
+			}
+			prep.workspace = ports.WorkspaceInfo{}
+			prep.workspaceProject = nil
+		}
+	}
 	return prep.workspace, prep.workspaceProject, prep.err
+}
+
+func (m *Manager) preparedTaskBaseMatches(ctx context.Context, prep *taskPreparation, current domain.ProjectRecord) bool {
+	if current.Config.WorktreeBaseBranch() != prep.project.Config.WorktreeBaseBranch() {
+		return false
+	}
+	check := func(repo, ref, sha string) bool {
+		if ref == "" || sha == "" {
+			return true // Non-Git workspace adapters have no Git base to validate.
+		}
+		tip, ok := spawnGitSingleLine(ctx, repo, "rev-parse", "--verify", ref+"^{commit}")
+		return ok && tip == sha
+	}
+	if prep.workspaceProject != nil {
+		currentBaseRefs := m.resolveWorkspaceBaseRefs(ctx, current)
+		for _, repo := range prep.workspaceProject.Worktrees {
+			if repo.BaseRef != "" && currentBaseRefs[filepath.Clean(repo.RepoPath)] != repo.BaseRef {
+				return false
+			}
+			if !check(repo.RepoPath, repo.BaseRef, repo.CreationSHA) {
+				return false
+			}
+		}
+		return true
+	}
+	return check(current.Path, prep.workspace.BaseRef, prep.workspace.BaseSHA)
 }
 
 // CancelTaskPreparation is idempotent. Once Spawn has claimed the token,

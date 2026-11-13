@@ -221,8 +221,7 @@ func (m *Manager) launchChatController(ctx context.Context, in chatSpawn) (domai
 
 	var diffBaseSHA, diffBaseRef string
 	if in.projectKind == domain.ProjectKindSingleRepo {
-		diffBaseSHA, diffBaseRef = resolveSpawnDiffBase(
-			ctx, in.workspace.Path, in.workspace.BaseRef)
+		diffBaseSHA, diffBaseRef = resolveWorkspaceDiffBase(ctx, in.workspace, in.project.Config.WorktreeBaseBranch())
 	}
 	// Chat Service retains this unprivileged base environment. The bearer is
 	// minted inside its per-session launch gate and is never cached for reuse.

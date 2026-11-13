@@ -395,8 +395,8 @@ type Workspace interface {
 }
 
 // WorkspaceDefaultBranchRefresher is an optional capability for Git-backed
-// workspaces. Resolution is local-only so callers can retain the canonical ref
-// even when the subsequent best-effort network refresh fails.
+// workspaces. Resolution is local-only. Fetching is an explicit remote action
+// and must not run as part of local task creation or restoration.
 type WorkspaceDefaultBranchRefresher interface {
 	ResolveDefaultBranch(ctx context.Context, repoPath, configuredBranch string) (WorkspaceDefaultBranch, error)
 	FetchDefaultBranch(ctx context.Context, repoPath string, target WorkspaceDefaultBranch) error
@@ -572,8 +572,8 @@ type WorkspaceConfig struct {
 	FreshBranch      bool
 	RequireNewBranch bool
 	// BaseBranch is the explicitly configured branch new session branches are
-	// created from. Empty asks the workspace adapter to resolve an authoritative
-	// repository default; it must never infer from the checked-out branch.
+	// created from. New local projects use a canonical refs/heads/<name>.
+	// Empty resolves legacy local metadata without contacting a remote.
 	BaseBranch string
 	// BaseRef is the exact canonical ref selected before any best-effort fetch.
 	// Restore carries it forward without re-resolving repository defaults.
