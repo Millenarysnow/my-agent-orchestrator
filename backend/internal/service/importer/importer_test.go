@@ -115,7 +115,7 @@ func TestValidateProjectImportPlainFolderNeedsPreparation(t *testing.T) {
 	if !result.IsValid || result.NextStep != ImportNextStepPrepareGit {
 		t.Fatalf("result = %#v, want prepare_git", result)
 	}
-	wantActions(t, result.Root.RequiredActions, []string{GitPreparationActionInit, GitPreparationActionCommit, GitPreparationActionCreateRemoteRepository})
+	wantActions(t, result.Root.RequiredActions, []string{GitPreparationActionInit, GitPreparationActionCommit})
 	if _, err := os.Stat(filepath.Join(root, ".git")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("Validate mutated git metadata: %v", err)
 	}
@@ -184,6 +184,7 @@ func TestValidateProjectImportRejectsFilePath(t *testing.T) {
 func TestValidateProjectImportRejectsAOStatePath(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	statePath := filepath.Join(home, ".ao", "data")
 	if err := os.MkdirAll(statePath, 0o750); err != nil {
 		t.Fatal(err)
@@ -215,7 +216,7 @@ func TestValidateProjectImportUnbornRepositoryNeedsCommitAndRemote(t *testing.T)
 	if !result.IsValid || result.NextStep != ImportNextStepPrepareGit || !result.Root.IsRepo || result.Root.HasCommit {
 		t.Fatalf("result = %#v, want unborn repo needing preparation", result)
 	}
-	wantActions(t, result.Root.RequiredActions, []string{GitPreparationActionCommit, GitPreparationActionCreateRemoteRepository})
+	wantActions(t, result.Root.RequiredActions, []string{GitPreparationActionCommit})
 }
 
 func TestValidateProjectImportParentWithChildReposChoosesImportKind(t *testing.T) {
@@ -243,7 +244,7 @@ func TestValidateProjectImportParentWithChildReposChoosesImportKind(t *testing.T
 	}
 }
 
-func TestValidateProjectImportRejectsDetachedHead(t *testing.T) {
+func TestValidateProjectImportListsLocalBranchesFromDetachedHead(t *testing.T) {
 	ctx := context.Background()
 	repo := gitRepoWithOrigin(t)
 	out, err := exec.Command("git", "-C", repo, "rev-parse", "HEAD").Output()
@@ -259,7 +260,7 @@ func TestValidateProjectImportRejectsDetachedHead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	if result.IsValid || result.NextStep != ImportNextStepError || len(result.BlockingErrors) != 1 || result.BlockingErrors[0] != "DETACHED_HEAD" {
+	if !result.IsValid || result.NextStep != ImportNextStepContinue || result.Root.CurrentBranch != "" || len(result.Root.LocalBranches) != 1 {
 		t.Fatalf("result = %#v, want detached-head error", result)
 	}
 }
@@ -302,12 +303,12 @@ func TestValidateProjectImportRootWithOriginAndChildReposWarnsProjectImport(t *t
 	if result.Warning == "" {
 		t.Fatal("warning = empty, want project import warning")
 	}
-	if got, want := result.Warning, "Selected folder has direct child repositories, but because the root repository already has an origin remote AO will import it as a project, not a workspace."; got != want {
+	if got, want := result.Warning, "Selected repository contains child repositories. Import it as a workspace to include them in tasks."; got != want {
 		t.Fatalf("warning = %q, want %q", got, want)
 	}
 }
 
-func TestValidateProjectImportRootWithoutOriginAndChildReposDoesNotWarn(t *testing.T) {
+func TestValidateProjectImportRootWithoutOriginAndChildReposWarnsAboutWorkspaceStructure(t *testing.T) {
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "repo")
 	gitRepoWithCommitNoOrigin(t, root)
@@ -319,10 +320,10 @@ func TestValidateProjectImportRootWithoutOriginAndChildReposDoesNotWarn(t *testi
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	if !result.IsValid || result.NextStep != ImportNextStepPrepareGit {
+	if !result.IsValid || result.NextStep != ImportNextStepContinue {
 		t.Fatalf("result = %#v, want prepare_git", result)
 	}
-	if result.Warning != "" {
+	if result.Warning == "" {
 		t.Fatalf("warning = %q, want none without root origin", result.Warning)
 	}
 }
@@ -527,9 +528,9 @@ func TestPrepareGitStepwiseCompletesInThreeCalls(t *testing.T) {
 			if !result.Validation.Root.IsRepo || result.Validation.Root.HasCommit || result.Validation.Root.HasOrigin {
 				t.Fatalf("first validation = %#v, want only git init complete", result.Validation)
 			}
-			wantActions(t, result.Validation.Root.RequiredActions, []string{GitPreparationActionCommit, GitPreparationActionCreateRemoteRepository})
+			wantActions(t, result.Validation.Root.RequiredActions, []string{GitPreparationActionCommit})
 		}
-		if index < 2 && result.Validation.NextStep != ImportNextStepPrepareGit {
+		if index < 1 && result.Validation.NextStep != ImportNextStepPrepareGit {
 			t.Fatalf("call %d validation = %#v, want prepare_git", index+1, result.Validation)
 		}
 		if index == 2 && result.Validation.NextStep != ImportNextStepContinue {
@@ -635,7 +636,7 @@ func TestPrepareGitAddsOnlyMissingOriginToCommittedRepository(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	wantActions(t, before.Root.RequiredActions, []string{GitPreparationActionCreateRemoteRepository})
+	wantActions(t, before.Root.RequiredActions, nil)
 
 	result, err := svc.PrepareGit(ctx, GitPreparationInput{
 		ImportKind:      ImportKindProject,
@@ -672,7 +673,7 @@ func TestPrepareGitSetsURLOnExistingOriginWithoutURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	wantActions(t, before.Root.RequiredActions, []string{GitPreparationActionCreateRemoteRepository})
+	wantActions(t, before.Root.RequiredActions, nil)
 
 	result, err := svc.PrepareGit(ctx, GitPreparationInput{
 		ImportKind:      ImportKindProject,
@@ -854,7 +855,7 @@ func TestPrepareGitProjectImportCanRetryAfterCommitFailure(t *testing.T) {
 	if len(failed.Events) != 3 || failed.Events[2].Action != GitPreparationActionCommit || failed.Events[2].State != GitPreparationEventError {
 		t.Fatalf("events = %#v, want commit failure", failed.Events)
 	}
-	wantActions(t, failed.Validation.Root.RequiredActions, []string{GitPreparationActionCommit, GitPreparationActionCreateRemoteRepository})
+	wantActions(t, failed.Validation.Root.RequiredActions, []string{GitPreparationActionCommit})
 	if importRemoteExists(repo, "origin") {
 		t.Fatal("origin added after commit failure")
 	}
@@ -901,7 +902,7 @@ func TestValidateWorkspaceImportOfGitRepoRequiresProjectChoice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	if !result.IsValid || result.NextStep != ImportNextStepChooseImportKind || result.Warning == "" {
+	if result.IsValid || result.NextStep != ImportNextStepError || len(result.ChildRepos) != 0 {
 		t.Fatalf("result = %#v, want project import choice", result)
 	}
 }
@@ -969,8 +970,8 @@ func TestValidateWorkspaceImportPartialChildrenExposeMissingActions(t *testing.T
 		t.Fatalf("result = %#v, want workspace needing preparation", result)
 	}
 	byPath := childStatusByPath(result.ChildRepos)
-	wantActions(t, byPath[unborn].RequiredActions, []string{GitPreparationActionCommit, GitPreparationActionSetRemote})
-	wantActions(t, byPath[noRemote].RequiredActions, []string{GitPreparationActionSetRemote})
+	wantActions(t, byPath[unborn].RequiredActions, []string{GitPreparationActionCommit})
+	wantActions(t, byPath[noRemote].RequiredActions, nil)
 	if _, ok := byPath[plain]; ok {
 		t.Fatalf("childRepos = %#v, plain folder must not be surfaced as a workspace repo", result.ChildRepos)
 	}

@@ -52,8 +52,8 @@ func prepareWorkspaceProject(ctx context.Context, parent string, projectID domai
 		}
 	}
 	if !hasReady {
-		return nil, apierr.Invalid("WORKSPACE_NO_READY_REPOS", "Workspace project must contain at least one fully resolved git repository with an origin remote", map[string]any{
-			"suggestedFix": "Initialize at least one child repository with a remote origin, then retry.",
+		return nil, apierr.Invalid("WORKSPACE_NO_READY_REPOS", "Workspace project must contain at least one Git repository with a committed local branch", map[string]any{
+			"suggestedFix": "Initialize at least one child repository and create its first local commit, then retry.",
 		})
 	}
 	if isGitRepo(parent) {
@@ -241,11 +241,8 @@ func validateWorkspaceChild(ctx context.Context, child string) error {
 			"suggestedFix": "Run `git init -b main`, add the initial files, and create the first commit before registering the workspace.",
 		})
 	}
-	if origin := resolveGitOriginURL(child); origin == "" {
-		return apierr.Invalid("WORKSPACE_CHILD_ORIGIN_REQUIRED", "Workspace child repositories must have an origin remote configured", map[string]any{
-			"path":         child,
-			"suggestedFix": "Run `git remote add origin <url>` in the child repository, then retry.",
-		})
+	if _, err := gitdefault.New("git", nil).ResolveLocal(ctx, child); err != nil {
+		return apierr.Invalid("WORKSPACE_CHILD_UNBORN", "Workspace child repositories need a committed local base branch", map[string]any{"path": child})
 	}
 	return nil
 }
@@ -382,8 +379,8 @@ func ensureWorkspaceGitignore(parent string, repos []domain.WorkspaceRepoRecord)
 }
 
 func resolveWorkspaceChildDefaultBranch(ctx context.Context, child string) string {
-	if branch := resolveDefaultBranch(ctx, child); branch != "" {
-		return branch
+	if resolution, err := gitdefault.New("git", nil).ResolveLocal(ctx, child); err == nil {
+		return resolution.Ref
 	}
 	if out, err := gitOutput(ctx, child, "config", "--local", "--get", gitdefault.ManagedDefaultConfigKey); err == nil {
 		return strings.TrimSpace(out)

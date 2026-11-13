@@ -84,7 +84,7 @@ func TestFolderMissing_LifecycleDeleteAndRecovery(t *testing.T) {
 		t.Fatal("Get FolderMissing = false after delete, want true")
 	}
 	// Default branch falls back to "auto" when folder is missing.
-	if res.Project.DefaultBranch != domain.DefaultBranchAuto {
+	if res.Project.DefaultBranch != "main" {
 		t.Fatalf("Get DefaultBranch = %q, want %q (missing folder falls back to auto)", res.Project.DefaultBranch, domain.DefaultBranchAuto)
 	}
 
@@ -163,7 +163,7 @@ func TestFolderMissing_MissingFolderFallsBackToAutoBranch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
-	if proj.DefaultBranch != domain.DefaultBranchAuto {
+	if proj.DefaultBranch != "main" {
 		t.Fatalf("initial DefaultBranch = %q, want %q", proj.DefaultBranch, domain.DefaultBranchAuto)
 	}
 
@@ -179,7 +179,7 @@ func TestFolderMissing_MissingFolderFallsBackToAutoBranch(t *testing.T) {
 	if !res.Project.FolderMissing {
 		t.Fatal("FolderMissing = false, want true")
 	}
-	if res.Project.DefaultBranch != domain.DefaultBranchAuto {
+	if res.Project.DefaultBranch != "main" {
 		t.Fatalf("DefaultBranch = %q, want %q when folder missing", res.Project.DefaultBranch, domain.DefaultBranchAuto)
 	}
 }

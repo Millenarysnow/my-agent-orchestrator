@@ -47,6 +47,8 @@ export type CreateProjectAgentSelection = {
 const EMPTY_INTAKE: IntakeForm = { enabled: false, repo: "", assignee: "" };
 const AGENT_MENU_WIDTH = "w-56! min-w-56! max-w-56!";
 type CreateProjectAgentSheetProps = {
+	baseBranchControl?: ReactNode;
+	baseBranchReady?: boolean;
 	preparedClonePath?: string;
 	onKeepCheckout?: () => void;
 	error?: string | null;
@@ -111,6 +113,8 @@ function projectSheetError(error: string, action: "create" | "clone"): SheetErro
 }
 
 export function CreateProjectAgentSheet({
+	baseBranchControl,
+	baseBranchReady = true,
 	preparedClonePath,
 	onKeepCheckout,
 	action = "create",
@@ -195,6 +199,7 @@ export function CreateProjectAgentSheet({
 			intakeAssignee: intake.assignee,
 		}) &&
 		!intakeIncomplete &&
+		baseBranchReady &&
 		!isBusy &&
 		!isLoadingAgents && connected && (!hostId || (
 			agents !== undefined && selectableAgents.some((agent) => agent.id === workerAgent) && selectableAgents.some((agent) => agent.id === orchestratorAgent)
@@ -273,6 +278,7 @@ export function CreateProjectAgentSheet({
 						}
 					/>
 					{preparedClonePath ? <p className="px-4 pt-3 text-[12px] text-muted-foreground">{t("createProject.cloneReady", { path: preparedClonePath })}</p> : null}
+					{baseBranchControl}
 					<ProjectSetupFormView
 						agentControls={{
 							worker: (

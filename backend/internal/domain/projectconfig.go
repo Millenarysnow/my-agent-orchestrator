@@ -22,7 +22,7 @@ type ProjectConfig struct {
 	// Numeric PR references use this repository when set; checkout/push stays on origin.
 	CanonicalRepoURL string `json:"canonicalRepoURL,omitempty"`
 	// DefaultBranch is the base branch new session worktrees are created from.
-	// Empty and DefaultBranchAuto both mean infer each repository's Git default.
+	// New local projects store refs/heads/<name>; empty/auto use local metadata.
 	DefaultBranch string `json:"defaultBranch,omitempty"`
 	// SessionPrefix overrides the displayed session-id prefix.
 	SessionPrefix string `json:"sessionPrefix,omitempty"`
@@ -198,8 +198,8 @@ func (c ProjectConfig) WithDefaults() ProjectConfig {
 }
 
 // WorktreeBaseBranch translates project configuration into the workspace
-// interface. An empty value tells the workspace adapter to resolve a remote
-// HEAD independently for the repository it is materializing.
+// interface. An empty value asks the adapter to resolve a local default
+// independently for the repository it is materializing.
 func (c ProjectConfig) WorktreeBaseBranch() string {
 	branch := c.WithDefaults().DefaultBranch
 	if branch == DefaultBranchAuto {

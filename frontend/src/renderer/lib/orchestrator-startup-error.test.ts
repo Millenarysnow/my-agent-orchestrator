@@ -2,13 +2,14 @@ import { describe, expect, it } from "vitest";
 import { formatOrchestratorStartupError } from "./orchestrator-startup-error";
 
 describe("formatOrchestratorStartupError", () => {
-	it("replaces unresolved child remote errors with setup guidance", () => {
+	it("lets a legacy remote failure be resolved by choosing a local base", () => {
 		const message =
 			`Project added, but orchestrator did not start: spawn workspace3-1: workspace: gitworktree: resolve workspace repo "test" base: workspace: default branch is unresolved: could not resolve remote "origin" HEAD for repository "/tmp/workspace3/test" (git -C /tmp/workspace3/test ls-remote --symref -- origin HEAD: exit status 128: remote: Repository not found. fatal: repository 'https://github.com/neversettle17-101/test.git/' not found); configure this repository's primary remote and cached HEAD (for example, git -C "/tmp/workspace3/test" remote set-head <remote> <branch>) and retry (DEFAULT_BRANCH_UNRESOLVED)`;
 
-		expect(formatOrchestratorStartupError(message)).toBe(
-			'Project added, but orchestrator did not start. The child repository "test" still needs its remote repository set up at https://github.com/neversettle17-101/test.git. Create or fix that remote, then retry starting the orchestrator.',
-		);
+		const result = formatOrchestratorStartupError(message);
+		expect(result).toContain("Check this child's local base branch");
+		expect(result).toContain(`Details: ${message}`);
+		expect(result).not.toContain("Create or fix that remote");
 	});
 
 	it("leaves unrelated spawn errors unchanged", () => {
@@ -25,7 +26,7 @@ describe("formatOrchestratorStartupError", () => {
 		const result = formatOrchestratorStartupError(message);
 		expect(result).toContain(`default branch for the ${label}`);
 		if (label.startsWith("child")) {
-			expect(result).toContain("this child's default branch");
+			expect(result).toContain("this child's local base branch");
 			expect(result).not.toContain("Project Settings");
 		} else {
 			expect(result).toContain("Project Settings");

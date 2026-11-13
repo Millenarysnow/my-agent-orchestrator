@@ -213,6 +213,18 @@ beforeEach(() => {
 });
 
 describe("ProjectSettingsForm", () => {
+	it("preserves the canonical local base when another setting is saved", async () => {
+		mockProject({
+			id: "proj-1", name: "Project One", kind: "single_repo", path: "/repo/project-one", repo: "", defaultBranch: "release/local",
+			config: { defaultBranch: "refs/heads/release/local", worker: { agent: "codex" }, orchestrator: { agent: "claude-code" }, autoReview: false },
+		});
+		renderSettings();
+		await userEvent.click(await screen.findByRole("switch", { name: "Auto review PRs" }));
+		await waitFor(() => expect(putMock).toHaveBeenCalledWith("/api/v1/projects/{id}", expect.objectContaining({
+			body: expect.objectContaining({ config: expect.objectContaining({ defaultBranch: "refs/heads/release/local", autoReview: true }) }),
+		})));
+	});
+
 	it("saves a changed project setting without a submit action", async () => {
 		mockProject({
 			id: "proj-1",

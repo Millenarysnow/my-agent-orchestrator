@@ -311,6 +311,9 @@ func (m *Service) Add(ctx context.Context, in AddInput) (Project, error) {
 		}
 		row.Kind = domain.ProjectKindWorkspace
 		row.RepoOriginURL = resolveGitOriginURL(path)
+		if err := normalizeLocalProjectBase(ctx, path, &row.Config); err != nil {
+			return Project{}, err
+		}
 		if err := row.Config.ValidateCanonicalRepository(row.RepoOriginURL); err != nil {
 			return Project{}, apierr.Invalid("INVALID_PROJECT_CONFIG", err.Error(), nil)
 		}
@@ -359,6 +362,11 @@ func (m *Service) Add(ctx context.Context, in AddInput) (Project, error) {
 		})
 	}
 	row.RepoOriginURL = originURL
+	// Registration fixes the selected local branch, not a mutable remote HEAD.
+	// Explicit remote-qualified legacy configurations remain readable locally.
+	if err := normalizeLocalProjectBase(ctx, path, &row.Config); err != nil {
+		return Project{}, err
+	}
 	if err := row.Config.ValidateCanonicalRepository(row.RepoOriginURL); err != nil {
 		return Project{}, apierr.Invalid("INVALID_PROJECT_CONFIG", err.Error(), nil)
 	}
@@ -758,6 +766,11 @@ func (m *Service) UpdateSettings(ctx context.Context, id domain.ProjectID, in Up
 	if err := in.Config.ValidateCanonicalRepository(row.RepoOriginURL); err != nil {
 		return Project{}, apierr.Invalid("INVALID_PROJECT_CONFIG", err.Error(), nil)
 	}
+	if row.Kind.WithDefault() != domain.ProjectKindScratch && in.Config.DefaultBranch != row.Config.DefaultBranch && in.Config.WorktreeBaseBranch() != "" {
+		if err := normalizeLocalProjectBase(ctx, row.Path, &in.Config); err != nil {
+			return Project{}, err
+		}
+	}
 	updated, err := m.store.UpdateProjectSettings(ctx, string(id), inDisplayName, in.Config)
 	if err != nil {
 		return Project{}, apierr.Internal("PROJECT_SETTINGS_UPDATE_FAILED", "Failed to update project settings")
@@ -794,6 +807,11 @@ func (m *Service) SetConfig(ctx context.Context, id domain.ProjectID, in SetConf
 	if err := in.Config.ValidateCanonicalRepository(row.RepoOriginURL); err != nil {
 		return Project{}, apierr.Invalid("INVALID_PROJECT_CONFIG", err.Error(), nil)
 	}
+	if row.Kind.WithDefault() != domain.ProjectKindScratch && in.Config.DefaultBranch != row.Config.DefaultBranch && in.Config.WorktreeBaseBranch() != "" {
+		if err := normalizeLocalProjectBase(ctx, row.Path, &in.Config); err != nil {
+			return Project{}, err
+		}
+	}
 	row.Config = in.Config
 	if err := m.store.UpsertProject(ctx, row); err != nil {
 		return Project{}, apierr.Internal("PROJECT_CONFIG_UPDATE_FAILED", "Failed to update project config")
@@ -829,16 +847,43 @@ func resolveGitOriginURL(path string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// resolveDefaultBranch inspects only authoritative local metadata: a cached
-// remote HEAD, or the branch AO recorded when it initialized a remoteless repo.
-// It deliberately never consults the checked-out branch and never guesses
-// main/master. Live remote lookup stays on the bounded workspace spawn path.
+// resolveDefaultBranch selects the local base for a newly registered project.
+// It uses cached AO default metadata when available, then the current local
+// branch; it never performs a live remote lookup.
 func resolveDefaultBranch(ctx context.Context, path string) string {
-	resolution, err := gitdefault.New("git", nil).Inspect(ctx, path)
+	resolution, err := gitdefault.New("git", nil).ResolveLocal(ctx, path)
 	if err != nil {
 		return ""
 	}
 	return resolution.Branch
+}
+
+func normalizeLocalProjectBase(ctx context.Context, path string, cfg *domain.ProjectConfig) error {
+	branch := cfg.WorktreeBaseBranch()
+	if branch == "" {
+		// New projects default to the source checkout, independently of remote
+		// default metadata. A detached checkout requires an explicit selection.
+		out, err := gitOutput(ctx, path, "symbolic-ref", "--quiet", "HEAD")
+		if err != nil {
+			return apierr.Invalid("LOCAL_BRANCH_REQUIRED", "Choose a committed local base branch for this project", nil)
+		}
+		branch = strings.TrimSpace(out)
+	} else if !strings.HasPrefix(branch, "refs/") {
+		if _, err := gitOutput(ctx, path, "rev-parse", "--verify", "refs/heads/"+branch+"^{commit}"); err == nil {
+			branch = "refs/heads/" + branch
+		}
+	}
+	if strings.HasPrefix(branch, "refs/heads/") {
+		name := strings.TrimPrefix(branch, "refs/heads/")
+		if _, err := gitOutput(ctx, path, "check-ref-format", "--branch", name); err != nil {
+			return apierr.Invalid("LOCAL_BRANCH_REQUIRED", "Choose a valid local base branch", nil)
+		}
+		if _, err := gitOutput(ctx, path, "rev-parse", "--verify", branch+"^{commit}"); err != nil {
+			return apierr.Invalid("LOCAL_BRANCH_REQUIRED", "The selected local base branch is unavailable; choose another branch", nil)
+		}
+	}
+	cfg.DefaultBranch = branch
+	return nil
 }
 
 // Remove stops live project sessions, reclaims safe managed workspaces, then
@@ -906,7 +951,7 @@ func (m *Service) projectFromRow(ctx context.Context, row domain.ProjectRecord) 
 		Kind:          kind,
 		Path:          row.Path,
 		Repo:          row.RepoOriginURL,
-		DefaultBranch: defaultBranch,
+		DefaultBranch: strings.TrimPrefix(defaultBranch, "refs/heads/"),
 		Agent:         string(m.defaultHarness),
 		FolderMissing: folderMissing,
 	}

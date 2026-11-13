@@ -188,7 +188,7 @@ func TestManager_AddListGetRemove(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
-	if proj.ID != "ao" || proj.Name != "Agent Orchestrator" || proj.Path != repo || proj.DefaultBranch != domain.DefaultBranchAuto {
+	if proj.ID != "ao" || proj.Name != "Agent Orchestrator" || proj.Path != repo || proj.DefaultBranch != "main" {
 		t.Fatalf("Add returned %#v", proj)
 	}
 
@@ -764,13 +764,13 @@ func TestManager_DefaultsWhenUnconfigured(t *testing.T) {
 	if got.Project == nil {
 		t.Fatalf("Get returned no project: %#v", got)
 	}
-	if got.Project.DefaultBranch != domain.DefaultBranchAuto {
-		t.Fatalf("default branch = %q, want %q", got.Project.DefaultBranch, domain.DefaultBranchAuto)
+	if got.Project.DefaultBranch != "main" {
+		t.Fatalf("default branch = %q, want %q", got.Project.DefaultBranch, "main")
 	}
 	if got.Project.Agent != "claude-code" {
 		t.Fatalf("default agent = %q, want claude-code", got.Project.Agent)
 	}
-	if got.Project.Config != nil {
+	if got.Project.Config == nil || got.Project.Config.DefaultBranch != "refs/heads/main" {
 		t.Fatalf("unconfigured project should omit config, got %#v", got.Project.Config)
 	}
 
@@ -809,7 +809,7 @@ func TestManager_GetUsesConfiguredDefaultHarness(t *testing.T) {
 	}
 }
 
-func TestManager_AddDoesNotTreatCurrentBranchAsAutomaticDefault(t *testing.T) {
+func TestManager_AddPinsCurrentLocalBranch(t *testing.T) {
 	ctx := context.Background()
 	m := newManager(t)
 	repo := gitRepoOnBranch(t, "master")
@@ -819,10 +819,10 @@ func TestManager_AddDoesNotTreatCurrentBranchAsAutomaticDefault(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 	// A lone local branch is not authoritative default-branch metadata.
-	if proj.DefaultBranch != domain.DefaultBranchAuto {
+	if proj.DefaultBranch != "master" {
 		t.Fatalf("DefaultBranch = %q, want auto", proj.DefaultBranch)
 	}
-	if proj.Config != nil {
+	if proj.Config == nil || proj.Config.DefaultBranch != "refs/heads/master" {
 		t.Fatalf("automatic branch selection should not pin config, got %#v", proj.Config)
 	}
 
@@ -830,7 +830,7 @@ func TestManager_AddDoesNotTreatCurrentBranchAsAutomaticDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if got.Project == nil || got.Project.DefaultBranch != domain.DefaultBranchAuto {
+	if got.Project == nil || got.Project.DefaultBranch != "master" {
 		t.Fatalf("Get DefaultBranch = %#v, want auto", got.Project)
 	}
 
@@ -849,10 +849,9 @@ func TestManager_AddDoesNotTreatCurrentBranchAsAutomaticDefault(t *testing.T) {
 	}
 }
 
-// A repo checked out on a feature branch must NOT report that branch as the
-// project default — resolution must prefer the remote default (origin/HEAD), so a
-// repo whose origin/HEAD is `main` stays on `main` even when HEAD is elsewhere.
-func TestManager_AddPrefersOriginHeadOverCheckedOutBranch(t *testing.T) {
+// New projects pin the selected local checkout, even when cached origin/HEAD
+// names a different branch.
+func TestManager_AddDefaultsToCurrentLocalBranch(t *testing.T) {
 	ctx := context.Background()
 	m := newManager(t)
 	repo := gitRepoWithOriginHead(t, "main", "fix/pr-attachment")
@@ -861,16 +860,13 @@ func TestManager_AddPrefersOriginHeadOverCheckedOutBranch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
-	// Automatic mode resolves origin/HEAD to main — never the feature branch.
-	if proj.DefaultBranch != domain.DefaultBranchName {
-		t.Fatalf("DefaultBranch = %q, want %q (not the checked-out feature branch)",
-			proj.DefaultBranch, domain.DefaultBranchName)
+	if proj.DefaultBranch != "fix/pr-attachment" {
+		t.Fatalf("DefaultBranch = %q, want selected local branch fix/pr-attachment", proj.DefaultBranch)
 	}
 }
 
-// When origin/HEAD points at a non-main default (e.g. master), automatic mode
-// reports that — not the feature branch the user happens to be on.
-func TestManager_AddPrefersOriginHeadNonMain(t *testing.T) {
+// A non-main remote default also cannot override the selected local branch.
+func TestManager_AddDefaultsToCheckedOutBranchWhenRemoteUsesDifferentDefault(t *testing.T) {
 	ctx := context.Background()
 	m := newManager(t)
 	repo := gitRepoWithOriginHead(t, "master", "fix/pr-attachment")
@@ -879,8 +875,8 @@ func TestManager_AddPrefersOriginHeadNonMain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
-	if proj.DefaultBranch != "master" {
-		t.Fatalf("DefaultBranch = %q, want master (origin/HEAD), not feature branch", proj.DefaultBranch)
+	if proj.DefaultBranch != "fix/pr-attachment" {
+		t.Fatalf("DefaultBranch = %q, want selected local branch fix/pr-attachment", proj.DefaultBranch)
 	}
 }
 
@@ -1699,10 +1695,10 @@ func TestManager_AddWorkspaceInitializesPlainParent(t *testing.T) {
 	if len(registeredRepos) != 2 {
 		t.Fatalf("registered workspace repos = %#v, want 2", registeredRepos)
 	}
-	if registeredRepos[0].Name != "api" || registeredRepos[0].DefaultBranch != "" {
+	if registeredRepos[0].Name != "api" || registeredRepos[0].DefaultBranch != "refs/heads/dev" {
 		t.Fatalf("registered api repo = %#v, want no guessed local default branch", registeredRepos[0])
 	}
-	if registeredRepos[1].Name != "cli" || registeredRepos[1].DefaultBranch != "" {
+	if registeredRepos[1].Name != "cli" || registeredRepos[1].DefaultBranch != "refs/heads/main" {
 		t.Fatalf("registered cli repo = %#v, want no guessed local default branch", registeredRepos[1])
 	}
 	ignored, err := os.ReadFile(filepath.Join(parent, ".gitignore"))
@@ -1798,7 +1794,7 @@ func TestManager_AddWorkspacePreservesAOInitializedChildDefaultBranchWithoutRemo
 	if len(registeredRepos) != 1 {
 		t.Fatalf("registered workspace repos = %#v, want 1", registeredRepos)
 	}
-	if got := registeredRepos[0].DefaultBranch; got != domain.DefaultBranchName {
+	if got := registeredRepos[0].DefaultBranch; got != "refs/heads/"+domain.DefaultBranchName {
 		t.Fatalf("registered child default branch = %q, want %q", got, domain.DefaultBranchName)
 	}
 }
@@ -1838,7 +1834,7 @@ func TestManager_AddWorkspaceAcceptsUnbornChildAsNeedsInit(t *testing.T) {
 	}
 }
 
-func TestManager_AddWorkspaceAcceptsChildWithoutOriginAsNeedsInit(t *testing.T) {
+func TestManager_AddWorkspaceAcceptsChildWithoutOriginAsReady(t *testing.T) {
 	configureCommitter(t)
 	ctx := context.Background()
 	m := newManager(t)
@@ -1855,7 +1851,7 @@ func TestManager_AddWorkspaceAcceptsChildWithoutOriginAsNeedsInit(t *testing.T) 
 	}
 	var needsInitRepo *project.WorkspaceRepo
 	for i := range proj.WorkspaceRepos {
-		if proj.WorkspaceRepos[i].GitStatus == string(domain.GitStatusNeedsInit) {
+		if proj.WorkspaceRepos[i].Name == "api" && proj.WorkspaceRepos[i].GitStatus == string(domain.GitStatusReady) {
 			needsInitRepo = &proj.WorkspaceRepos[i]
 			break
 		}

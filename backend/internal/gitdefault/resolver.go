@@ -38,6 +38,8 @@ const (
 	SourceCachedRemoteHead Source = "cached_remote_head"
 	// SourceAOInitialized means AO recorded the branch when it initialized the repository.
 	SourceAOInitialized Source = "ao_initialized"
+	// SourceLocalHead is the source checkout's current committed local branch.
+	SourceLocalHead Source = "local_head"
 )
 
 // Resolution is an authoritative branch plus the ref that can safely seed a
@@ -108,6 +110,38 @@ func (r *Resolver) Inspect(ctx context.Context, repo string) (Resolution, error)
 	return Resolution{}, unresolvedf(
 		"remote %q in repository %q has no cached HEAD", remote, repo,
 	)
+}
+
+// ResolveLocal chooses a committed local branch without contacting a remote.
+// Cached default metadata only supplies a branch name; an existing local head
+// wins over its remote-tracking namesake, including unpushed local commits.
+func (r *Resolver) ResolveLocal(ctx context.Context, repo string) (Resolution, error) {
+	if cached, err := r.Inspect(ctx, repo); err == nil {
+		ref := "refs/heads/" + cached.Branch
+		if r.refExists(ctx, repo, ref+"^{commit}") {
+			cached.Ref = ref
+			cached.Remote = ""
+			return cached, nil
+		}
+		// Detached child checkouts can still name a committed local base via
+		// cached default metadata; keep that cache without contacting its host.
+		if r.refExists(ctx, repo, cached.Ref+"^{commit}") {
+			return cached, nil
+		}
+	}
+	out, err := r.run(ctx, r.binary, "-C", repo, "symbolic-ref", "--quiet", "HEAD")
+	ref := strings.TrimSpace(string(out))
+	branch, local := strings.CutPrefix(ref, "refs/heads/")
+	if err != nil || !local || !r.refExists(ctx, repo, ref+"^{commit}") {
+		if out, listErr := r.run(ctx, r.binary, "-C", repo, "for-each-ref", "--format=%(refname)", "--count=2", "refs/heads/"); listErr == nil {
+			refs := strings.Fields(string(out))
+			if len(refs) == 1 && r.refExists(ctx, repo, refs[0]+"^{commit}") {
+				return Resolution{Branch: strings.TrimPrefix(refs[0], "refs/heads/"), Ref: refs[0], Source: SourceLocalHead}, nil
+			}
+		}
+		return Resolution{}, unresolvedf("repository %q has no committed local base branch; choose a local branch in project settings", repo)
+	}
+	return Resolution{Branch: branch, Ref: ref, Source: SourceLocalHead}, nil
 }
 
 // FindCachedRemoteBranch returns a fetched branch from the repository's

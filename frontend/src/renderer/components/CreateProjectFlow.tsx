@@ -217,6 +217,11 @@ export function CreateProjectFlow({
 	const [selectedPath, setSelectedPath] = useState<string | null>(null);
 	const [validationScan, setValidationScan] = useState<ImportFolderScan | null>(null);
 	const [projectValidation, setProjectValidation] = useState<ImportValidationResult | null>(null);
+	const [projectBaseBranch, setProjectBaseBranch] = useState("");
+	const projectLocalBranches = projectValidation?.root.localBranches;
+	useEffect(() => {
+		setProjectBaseBranch(projectValidation?.root.currentBranch ?? "");
+	}, [projectValidation?.root.repoPath, projectValidation?.root.currentBranch]);
 	const projectImportStep = activeView === "blocked" || activeView === "prepare_git" ? activeView : null;
 	const [projectPrepEvents, setProjectPrepEvents] = useState<GitPreparationEvent[]>([]);
 	const [projectApprovedActions, setProjectApprovedActions] = useState<string[]>([]);
@@ -516,7 +521,7 @@ export function CreateProjectFlow({
 				if (!prepared) throw new Error(t("createProject.couldNotAdd"));
 				for (let attempt = 0; ; attempt++) {
 					try {
-						await onCreateProject({ path: selectedPath, clonePreparationId: prepared.preparationId, ...selection });
+						await onCreateProject({ path: selectedPath, clonePreparationId: prepared.preparationId, ...(projectBaseBranch ? { defaultBranch: `refs/heads/${projectBaseBranch}` } : {}), ...selection });
 						break;
 					} catch (err: unknown) {
 						if (attempt === 2 || !(err instanceof TypeError || apiErrorCode(err) === "SERVICE_UNAVAILABLE")) throw err;
@@ -537,13 +542,7 @@ export function CreateProjectFlow({
 				setIsInitializing(false);
 				setIsCreating(true);
 			}
-		// Workspace imports can adopt an existing local Git root. Preserve its
-		// checked-out branch as the workspace default (child defaults stay
-		// separate); the daemon resolves it at spawn time. Single-repo imports
-		// skip this lookup entirely — the daemon resolves their base branch
-		// itself, saving a blocking IPC round-trip on the critical path.
-		const defaultBranch =
-			selectedKind === "workspace" && !hostId ? await aoBridge.app.getRepositoryBranch(selectedPath) : undefined;
+		const defaultBranch = projectBaseBranch ? `refs/heads/${projectBaseBranch}` : undefined;
 		await onCreateProject({
 			path: selectedPath,
 			asWorkspace: selectedKind === "workspace",
@@ -980,6 +979,18 @@ export function CreateProjectFlow({
 				validation={projectValidation}
 			/>
 			<CreateProjectAgentSheet
+				baseBranchReady={!projectLocalBranches?.length || projectLocalBranches.includes(projectBaseBranch)}
+				baseBranchControl={projectLocalBranches?.length ? (
+					<div className="px-4 pt-3">
+						<Label className="agents-sheet-label" htmlFor="newProjectBaseBranch">{t("createProject.baseBranch", { defaultValue: "Task base branch" })}</Label>
+						<Select value={projectBaseBranch} onValueChange={setProjectBaseBranch}>
+							<SelectTrigger id="newProjectBaseBranch" className="agents-sheet-control mt-1 w-full">
+								<SelectValue placeholder={t("createProject.chooseLocalBranch", { defaultValue: "Choose a local branch" })} />
+							</SelectTrigger>
+							<SelectContent>{projectLocalBranches.map((branch) => <SelectItem key={branch} value={branch}>{branch}</SelectItem>)}</SelectContent>
+						</Select>
+					</div>
+				) : undefined}
 				preparedClonePath={cloneSelection ? selectedPath ?? undefined : undefined}
 				onKeepCheckout={cloneRegistrationFailed ? async () => {
 					if (!(await abandonPreparedClone())) return;
@@ -1101,6 +1112,8 @@ function importBlockingErrorLabel(code: string): string {
 			return "AO could not inspect the repositories under this folder.";
 		case "IMPORT_PATH_UNSAFE":
 			return "Choose a specific project folder outside AO's own state directories.";
+		case "LOCAL_BRANCH_REQUIRED":
+			return "Create or choose a committed local branch before importing this repository.";
 		case "DETACHED_HEAD":
 			return "This repository is checked out in detached HEAD state. Check out a named branch before importing it.";
 		case "WORKSPACE_CHILD_REPO_REQUIRED":
@@ -2732,11 +2745,10 @@ function CreateProjectFolderDialog({
 	const isWorkspace = kind === "workspace";
 	const displayRepos = isWorkspace ? mergeWorkspaceImportRepos(scan, validation) : normalizeImportRepos(scan?.repos ?? []);
 	const workspaceHasNoChildGitRepos = isWorkspace && validation?.blockingErrors.includes("WORKSPACE_CHILD_REPO_REQUIRED");
-	const workspaceRootIsProject = isWorkspace && validation?.root.isRepo === true && validation.root.hasOrigin === true;
+	const workspaceRootIsProject = isWorkspace && validation?.root.isRepo === true && workspaceHasNoChildGitRepos;
 	const workspaceValidationBlocked = isWorkspace && validation !== null && (!validation.isValid || validation.nextStep === "error") && !workspaceHasNoChildGitRepos;
 	const workspaceExcludedRepos = isWorkspace ? displayRepos.filter((repo) => repo.isRepo && repo.requiredActions.length > 0) : [];
-	// The daemon registers children without a commit or origin as not set up and
-	// leaves them out of sessions, so only block when no child repo is ready.
+	// Only missing local commits or invalid Git metadata make a child unready.
 	const workspaceHasReadyRepo = displayRepos.some((repo) => repo.isRepo && repo.requiredActions.length === 0 && repo.status !== "error" && repo.blockingErrors.length === 0);
 	const workspaceReposNeedSetup = workspaceExcludedRepos.length > 0 && !workspaceHasReadyRepo;
 	const workspaceReposExcluded = workspaceExcludedRepos.length > 0 && workspaceHasReadyRepo;
@@ -2744,7 +2756,7 @@ function CreateProjectFolderDialog({
 	const failedRepos =
 		displayRepos.filter(
 			(repo) =>
-				(repo.status === "error" || !repo.hasRemote) &&
+				(repo.status === "error") &&
 				repo.requiredActions.length === 0 &&
 				!repo.needsGitInit &&
 				repo.reason !== "Repository must have at least one commit.",
@@ -2944,8 +2956,8 @@ function mergeWorkspaceImportRepos(scan: ImportFolderScan | null, validation: Im
 
 function scanRequiredActions(repo: ImportFolderScan["repos"][number] | undefined): string[] {
 	if (!repo || repo.status === "error") return [];
-	if (!repo.isRepo) return [...GIT_PREPARATION_ACTIONS];
-	return [...(!repo.hasCommit ? ["git_commit"] : []), ...(!repo.hasRemote ? ["set_remote"] : [])];
+	if (!repo.isRepo) return ["git_init", "git_commit"];
+	return !repo.hasCommit ? ["git_commit"] : [];
 }
 
 function repositoryAvatarFromGitUrl(remote: string): { owner: string; url: string } | null {

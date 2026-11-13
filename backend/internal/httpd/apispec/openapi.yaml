@@ -19570,6 +19570,8 @@ components:
           items:
             type: string
           type: array
+        currentBranch:
+          type: string
         hasCommit:
           type: boolean
         hasOrigin:
@@ -19578,6 +19580,10 @@ components:
           type: boolean
         isRepo:
           type: boolean
+        localBranches:
+          items:
+            type: string
+          type: array
         needsGitInit:
           type: boolean
         repoPath:

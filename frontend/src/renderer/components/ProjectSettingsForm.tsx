@@ -146,7 +146,7 @@ function SettingsBody({ project, projectId, hostId, hostConnected, onSaved, sect
 	const intake: TrackerIntakeConfig = config.trackerIntake ?? {};
 	const initialValues: ProjectSettingsDraft = {
 		displayName: project.name,
-		defaultBranch: config.defaultBranch ?? DEFAULT_BRANCH_AUTO,
+		defaultBranch: config.defaultBranch?.replace(/^refs\/heads\//, "") ?? DEFAULT_BRANCH_AUTO,
 		sessionPrefix: config.sessionPrefix ?? "",
 		workerAgent: config.worker?.agent ?? "",
 		orchestratorAgent: config.orchestrator?.agent ?? "",
@@ -206,7 +206,9 @@ function SettingsBody({ project, projectId, hostId, hostConnected, onSaved, sect
 				}
 			: {
 					...config,
-					defaultBranch: values.defaultBranch.trim() === DEFAULT_BRANCH_AUTO ? undefined : values.defaultBranch || undefined,
+					defaultBranch: values.defaultBranch === initialValues.defaultBranch
+						? config.defaultBranch
+						: values.defaultBranch.trim() === DEFAULT_BRANCH_AUTO ? undefined : values.defaultBranch || undefined,
 					sessionPrefix: values.sessionPrefix || undefined,
 					worker: {
 						...config.worker,

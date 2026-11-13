@@ -4,7 +4,7 @@ import { agentReadiness } from "../src/renderer/test/agent-readiness-fixtures";
 import { installFakeAgent } from "./support/fake-bridge";
 
 for (const platform of ["macOS", "Windows", "Linux"] as const) {
-test(`renderer: workspace import preserves the root branch and explains unresolved startup on ${platform} @T0`, async ({ page }) => {
+test(`renderer: workspace import uses a selected local root branch without a remote on ${platform} @T0`, async ({ page }) => {
 	test.setTimeout(120_000);
 	await installFakeAgent(page, { projectId: "local-root", workers: [] });
 	await page.addInitScript((platform) => {
@@ -25,14 +25,14 @@ test(`renderer: workspace import preserves the root branch and explains unresolv
 		if (pathname === "/api/v1/imports/validate" && route.request().method() === "POST") {
 			await route.fulfill({ json: {
 				importKind: "workspace", isValid: true, blockingErrors: [], nextStep: "continue",
-				root: { repoPath: "/repos/local-root", isRepo: false, hasCommit: false, hasOrigin: false, isEmptyFolder: false, needsGitInit: false, requiredActions: [], blockingErrors: [] },
-				childRepos: [{ repoPath: "/repos/local-root/api", isRepo: true, hasCommit: true, hasOrigin: true, isEmptyFolder: false, needsGitInit: false, requiredActions: [], blockingErrors: [] }],
+				root: { repoPath: "/repos/local-root", isRepo: true, hasCommit: true, hasOrigin: false, isEmptyFolder: false, needsGitInit: false, localBranches: ["trunk", "release/local"], currentBranch: "trunk", requiredActions: [], blockingErrors: [] },
+				childRepos: [{ repoPath: "/repos/local-root/api", isRepo: true, hasCommit: true, hasOrigin: false, isEmptyFolder: false, needsGitInit: false, requiredActions: [], blockingErrors: [] }],
 			} });
 			return;
 		}
 		if (pathname === "/api/v1/projects" && route.request().method() === "POST") {
 			expect(route.request().postDataJSON()).toMatchObject({
-				path: "/repos/local-root", asWorkspace: true, config: { defaultBranch: "trunk" },
+				path: "/repos/local-root", asWorkspace: true, config: { defaultBranch: "refs/heads/release/local" },
 			});
 			created = true;
 			await route.fulfill({ json: { project: {
@@ -45,7 +45,7 @@ test(`renderer: workspace import preserves the root branch and explains unresolv
 			// A separate runtime failure must retain its real cause in the board.
 			await route.fulfill({ status: 422, json: {
 				error: "invalid", code: "DEFAULT_BRANCH_UNRESOLVED",
-				message: 'resolve workspace repo "__root__" base: remote did not advertise a symbolic HEAD (DEFAULT_BRANCH_UNRESOLVED)',
+				message: 'resolve workspace repo "__root__" base: selected local branch "release/local" is unavailable (DEFAULT_BRANCH_UNRESOLVED)',
 			} });
 			return;
 		}
@@ -64,8 +64,8 @@ test(`renderer: workspace import preserves the root branch and explains unresolv
 		bridge.app.scanImportFolder = async () => ({ path: "/repos/local-root", repos: [
 			{
 				name: "api", path: "/repos/local-root/api", relativePath: "api", branch: "dev",
-				hasRemote: true, isRepo: true, hasCommit: true,
-				remote: "https://github.com/example/api.git", status: "ok",
+				hasRemote: false, isRepo: true, hasCommit: true,
+				remote: "", status: "ok",
 			},
 			{
 				name: "docs", path: "/repos/local-root/docs", relativePath: "docs", branch: "",
@@ -79,10 +79,12 @@ test(`renderer: workspace import preserves the root branch and explains unresolv
 	await expect(page.getByText("docs", { exact: true })).not.toBeVisible();
 	await expect(page.getByRole("button", { name: /Set up|Hide setup/ })).not.toBeVisible();
 	await page.getByRole("button", { name: "Continue", exact: true }).click();
+	await page.getByRole("combobox", { name: "Task base branch" }).click();
+	await page.getByRole("option", { name: "release/local", exact: true }).click();
 	await page.getByRole("button", { name: "Create workspace and start", exact: true }).click();
 	await expect(page).toHaveURL(/projects\/local-root/);
 	await expect(page.getByText(/AO could not determine the default branch for the workspace root repository/)).toBeVisible();
-	await expect(page.getByText(/Details:.*remote did not advertise a symbolic HEAD/)).toBeVisible();
+	await expect(page.getByText(/Details:.*selected local branch.*release\/local/)).toBeVisible();
 	expect(created).toBe(true);
 	expect(started).toBe(true);
 	await page.screenshot({ path: `test-results/workspace-root-startup-${platform}.png` });

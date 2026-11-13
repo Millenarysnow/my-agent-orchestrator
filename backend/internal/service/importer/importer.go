@@ -106,6 +106,8 @@ type RepoGitStatus struct {
 	IsRepo          bool     `json:"isRepo"`
 	HasCommit       bool     `json:"hasCommit"`
 	HasOrigin       bool     `json:"hasOrigin"`
+	LocalBranches   []string `json:"localBranches,omitempty"`
+	CurrentBranch   string   `json:"currentBranch,omitempty"`
 	IsEmptyFolder   bool     `json:"isEmptyFolder"`
 	NeedsGitInit    bool     `json:"needsGitInit"`
 	RequiredActions []string `json:"requiredActions"`
@@ -217,12 +219,6 @@ func (m *Manager) Validate(ctx context.Context, in ImportValidationInput) (Impor
 	}
 
 	root := inspectImportRepo(ctx, path)
-	if importKind == ImportKindProject {
-		root.RequiredActions = addProjectRemoteRepositoryAction(root.RequiredActions)
-		if root.HasOrigin && root.HasCommit && importGitHubPreparationIncomplete(ctx, path) && !slices.Contains(root.RequiredActions, GitPreparationActionCreateRemoteRepository) {
-			root.RequiredActions = append(root.RequiredActions, GitPreparationActionCreateRemoteRepository)
-		}
-	}
 	result.Root = root
 	if len(root.BlockingErrors) > 0 {
 		result.BlockingErrors = append(result.BlockingErrors, root.BlockingErrors...)
@@ -231,11 +227,6 @@ func (m *Manager) Validate(ctx context.Context, in ImportValidationInput) (Impor
 		return result, nil
 	}
 	if importKind == ImportKindWorkspace {
-		if root.IsRepo && root.HasOrigin {
-			result.Warning = "This folder is already a Git project. AO will import it as a project instead of a workspace."
-			result.NextStep = ImportNextStepChooseImportKind
-			return result, nil
-		}
 		children, scanErr := directChildImportRepos(ctx, path)
 		if scanErr != nil {
 			return invalidImportResult(importKind, path, "CHILD_REPO_SCAN_FAILED"), nil //nolint:nilerr // validation failures are reported in-band so the UI can show blocking errors
@@ -273,8 +264,8 @@ func (m *Manager) Validate(ctx context.Context, in ImportValidationInput) (Impor
 			return result, nil
 		}
 	}
-	if root.HasOrigin && len(children) > 0 {
-		result.Warning = "Selected folder has direct child repositories, but because the root repository already has an origin remote AO will import it as a project, not a workspace."
+	if root.IsRepo && len(children) > 0 {
+		result.Warning = "Selected repository contains child repositories. Import it as a workspace to include them in tasks."
 	}
 	if len(root.RequiredActions) > 0 {
 		result.NextStep = ImportNextStepPrepareGit
@@ -303,6 +294,16 @@ func (m *Manager) PrepareGit(ctx context.Context, in GitPreparationInput) (GitPr
 	targets, err := preparationTargets(ctx, validation, in)
 	if err != nil {
 		return GitPreparationResult{}, err
+	}
+	// Remote setup is optional and runs only when specifically requested.
+	// Missing origin alone never makes local import depend on publishing.
+	for i := range targets {
+		for _, action := range targets[i].Input.ApprovedActions {
+			if (action == GitPreparationActionSetRemote || action == GitPreparationActionCreateRemoteRepository) &&
+				(!targets[i].Status.HasOrigin || action == GitPreparationActionCreateRemoteRepository && importGitHubPreparationIncomplete(ctx, targets[i].Status.RepoPath)) {
+				targets[i].Status.RequiredActions = append(targets[i].Status.RequiredActions, action)
+			}
+		}
 	}
 	if in.Stepwise {
 		for _, target := range targets {
@@ -405,8 +406,16 @@ func inspectImportRepo(ctx context.Context, path string) RepoGitStatus {
 	status.HasCommit = status.IsRepo && importRepoHasCommit(ctx, path)
 	status.HasOrigin = status.IsRepo && resolveImportOriginURL(path) != ""
 	status.NeedsGitInit = !status.IsRepo
-	if status.IsRepo && status.HasCommit && importRepoHasDetachedHead(ctx, path) {
-		status.BlockingErrors = append(status.BlockingErrors, "DETACHED_HEAD")
+	if status.IsRepo {
+		if out, err := importGitOutput(ctx, path, "for-each-ref", "--format=%(refname:strip=2)", "refs/heads/"); err == nil {
+			status.LocalBranches = strings.Fields(out)
+		}
+		if out, err := importGitOutput(ctx, path, "symbolic-ref", "--quiet", "--short", "HEAD"); err == nil {
+			status.CurrentBranch = strings.TrimSpace(out)
+		}
+		if status.HasCommit && len(status.LocalBranches) == 0 {
+			status.BlockingErrors = append(status.BlockingErrors, "LOCAL_BRANCH_REQUIRED")
+		}
 	}
 	if status.NeedsGitInit {
 		status.RequiredActions = append(status.RequiredActions, GitPreparationActionInit)
@@ -414,26 +423,7 @@ func inspectImportRepo(ctx context.Context, path string) RepoGitStatus {
 	if !status.HasCommit {
 		status.RequiredActions = append(status.RequiredActions, GitPreparationActionCommit)
 	}
-	if !status.HasOrigin {
-		status.RequiredActions = append(status.RequiredActions, GitPreparationActionSetRemote)
-	}
 	return status
-}
-
-func addProjectRemoteRepositoryAction(actions []string) []string {
-	if len(actions) == 0 {
-		return actions
-	}
-	next := make([]string, 0, len(actions))
-	for _, action := range actions {
-		if action == GitPreparationActionSetRemote {
-			action = GitPreparationActionCreateRemoteRepository
-		}
-		if !slices.Contains(next, action) {
-			next = append(next, action)
-		}
-	}
-	return next
 }
 
 type gitPreparationTarget struct {
@@ -466,10 +456,10 @@ func preparationTargets(ctx context.Context, validation ImportValidationResult, 
 	}
 	var targets []gitPreparationTarget
 	for _, status := range validation.ChildRepos {
-		if len(status.RequiredActions) == 0 {
+		input, ok := byPath[status.RepoPath]
+		if len(status.RequiredActions) == 0 && !ok {
 			continue
 		}
-		input, ok := byPath[status.RepoPath]
 		if !ok {
 			return nil, apierr.Invalid("IMPORT_REPOSITORY_APPROVAL_REQUIRED", "Every repository with missing Git preparation requires explicit approval.", map[string]any{"repoPath": status.RepoPath})
 		}
@@ -712,11 +702,6 @@ func isBareImportRepo(ctx context.Context, path string) bool {
 func importRepoHasCommit(ctx context.Context, path string) bool {
 	_, err := importGitOutput(ctx, path, "rev-parse", "--verify", "HEAD")
 	return err == nil
-}
-
-func importRepoHasDetachedHead(ctx context.Context, path string) bool {
-	_, err := importGitOutput(ctx, path, "symbolic-ref", "--quiet", "--short", "HEAD")
-	return err != nil
 }
 
 var importScpRemotePattern = regexp.MustCompile(`^[^/@:\s]+@[^/:\s]+:(.+)$`)

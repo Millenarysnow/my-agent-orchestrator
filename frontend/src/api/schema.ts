@@ -6846,10 +6846,12 @@ export interface components {
         };
         RepoGitStatus: {
             blockingErrors: string[];
+            currentBranch?: string;
             hasCommit: boolean;
             hasOrigin: boolean;
             isEmptyFolder: boolean;
             isRepo: boolean;
+            localBranches?: string[];
             needsGitInit: boolean;
             repoPath: string;
             requiredActions: string[];
