@@ -2740,40 +2740,43 @@ func TestSessionRenameMissingSessionReturnsNotFound(t *testing.T) {
 // fakeCommander records Kill/Spawn calls so a test can assert the
 // clean-orchestrator ordering without wiring a real session engine.
 type fakeCommander struct {
-	killed            []domain.SessionID
-	retired           []domain.SessionID
-	exited            []domain.SessionID
-	resumed           []domain.SessionID
-	ready             []domain.SessionID
-	sent              []domain.SessionID
-	sentMessages      []string
-	cleanupProjects   []domain.ProjectID
-	killErr           error
-	retireErr         error
-	retireFunc        func(context.Context, domain.SessionID) error
-	sendErr           error
-	sendFunc          func(domain.SessionID, string) error
-	cleanupErr        error
-	spawnErr          error
-	spawnWaitsForCtx  bool
-	spawnHook         func(context.Context)
-	spawnRecord       domain.SessionRecord
-	requestKillResult *sessionmanager.KillResult
-	spawnFunc         func(ports.SpawnConfig) domain.SessionRecord
-	spawnCalls        int
-	spawned           bool
-	spawnedCfg        ports.SpawnConfig
-	spawnCtx          context.Context
-	killsAtSpawn      int
-	restoreErr        error
-	restoreResult     sessionmanager.RestoreResult
-	readyErr          error
-	backgroundResult  string
-	backgroundErr     error
-	backgroundFunc    func(backgroundTaskCall) (string, error)
-	backgroundCalls   []backgroundTaskCall
-	killFunc          func(domain.SessionID)
-	killMu            sync.Mutex
+	killed                   []domain.SessionID
+	retired                  []domain.SessionID
+	workspaceCleanupProjects []domain.ProjectID
+	workspaceCleanupErr      error
+	events                   []string
+	exited                   []domain.SessionID
+	resumed                  []domain.SessionID
+	ready                    []domain.SessionID
+	sent                     []domain.SessionID
+	sentMessages             []string
+	cleanupProjects          []domain.ProjectID
+	killErr                  error
+	retireErr                error
+	retireFunc               func(context.Context, domain.SessionID) error
+	sendErr                  error
+	sendFunc                 func(domain.SessionID, string) error
+	cleanupErr               error
+	spawnErr                 error
+	spawnWaitsForCtx         bool
+	spawnHook                func(context.Context)
+	spawnRecord              domain.SessionRecord
+	requestKillResult        *sessionmanager.KillResult
+	spawnFunc                func(ports.SpawnConfig) domain.SessionRecord
+	spawnCalls               int
+	spawned                  bool
+	spawnedCfg               ports.SpawnConfig
+	spawnCtx                 context.Context
+	killsAtSpawn             int
+	restoreErr               error
+	restoreResult            sessionmanager.RestoreResult
+	readyErr                 error
+	backgroundResult         string
+	backgroundErr            error
+	backgroundFunc           func(backgroundTaskCall) (string, error)
+	backgroundCalls          []backgroundTaskCall
+	killFunc                 func(domain.SessionID)
+	killMu                   sync.Mutex
 }
 
 type backgroundTaskCall struct {
@@ -2784,6 +2787,7 @@ type backgroundTaskCall struct {
 }
 
 func (f *fakeCommander) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.SessionRecord, int, int, error) {
+	f.events = append(f.events, "spawn")
 	f.spawnCtx = ctx
 	if f.spawnHook != nil {
 		f.spawnHook(ctx)
@@ -2848,6 +2852,7 @@ func (f *fakeCommander) Kill(_ context.Context, id domain.SessionID) (bool, erro
 	return true, nil
 }
 func (f *fakeCommander) RetireForReplacement(ctx context.Context, id domain.SessionID) error {
+	f.events = append(f.events, "retire:"+string(id))
 	if f.retireFunc != nil {
 		return f.retireFunc(ctx, id)
 	}
@@ -2856,6 +2861,11 @@ func (f *fakeCommander) RetireForReplacement(ctx context.Context, id domain.Sess
 	}
 	f.retired = append(f.retired, id)
 	return nil
+}
+func (f *fakeCommander) RetryOrchestratorWorkspaceCleanups(_ context.Context, project domain.ProjectID) error {
+	f.events = append(f.events, "retry-workspace:"+string(project))
+	f.workspaceCleanupProjects = append(f.workspaceCleanupProjects, project)
+	return f.workspaceCleanupErr
 }
 func (f *fakeCommander) WaitForMessageDeliveryReady(_ context.Context, id domain.SessionID) error {
 	f.ready = append(f.ready, id)
@@ -3043,32 +3053,54 @@ func TestSpawnOrchestratorCleanRetiresActiveOrchestratorsBeforeSpawn(t *testing.
 	if len(fc.retired) != 2 {
 		t.Fatalf("retired = %v, want the two active orchestrators", fc.retired)
 	}
-	if len(fc.sent) != 2 {
-		t.Fatalf("retire notices = %v, want the two active orchestrators", fc.sent)
+	if len(fc.sent) != 0 {
+		t.Fatalf("replacement must stop the old controller without sending an agent turn: sent=%v", fc.sent)
 	}
 	if !fc.spawned || fc.killsAtSpawn != 2 {
 		t.Fatalf("spawn must run after both retirements: spawned=%v retirementsAtSpawn=%d", fc.spawned, fc.killsAtSpawn)
+	}
+	if !slices.Equal(fc.events, []string{"retry-workspace:mer", "retire:mer-1", "retire:mer-2", "spawn"}) {
+		t.Fatalf("replacement events = %v, want pending cleanup, retirements, then spawn", fc.events)
 	}
 	if len(fc.killed) != 0 {
 		t.Fatalf("interactive Kill must not be used for replacement: killed=%v", fc.killed)
 	}
 }
 
-func TestSpawnOrchestratorCleanContinuesWhenRetireNoticeFails(t *testing.T) {
+func TestSpawnOrchestratorStopsWhenAcceptedWorkspaceCleanupCannotFinish(t *testing.T) {
 	st := newFakeStore()
 	st.projects["mer"] = domain.ProjectRecord{ID: "mer"}
 	st.sessions["mer-1"] = domain.SessionRecord{ID: "mer-1", ProjectID: "mer", Kind: domain.KindOrchestrator}
-	fc := &fakeCommander{sendErr: errors.New("pane closed")}
+	fc := &fakeCommander{workspaceCleanupErr: sessionmanager.ErrOrchestratorWorkspaceReleasePending}
 	svc := &Service{manager: fc, store: st}
 
-	if _, err := svc.SpawnOrchestrator(context.Background(), "mer", true, "", ""); err != nil {
-		t.Fatalf("SpawnOrchestrator: %v", err)
+	_, err := svc.SpawnOrchestrator(context.Background(), "mer", true, "", "")
+	var apiError *apierr.Error
+	if !errors.As(err, &apiError) || apiError.Code != "ORCHESTRATOR_WORKSPACE_RELEASE_FAILED" {
+		t.Fatalf("SpawnOrchestrator error = %v, want workspace release API error", err)
 	}
-	if len(fc.retired) != 1 || fc.retired[0] != "mer-1" {
-		t.Fatalf("retired = %v, want mer-1 despite retire notice failure", fc.retired)
+	if !slices.Equal(fc.workspaceCleanupProjects, []domain.ProjectID{"mer"}) {
+		t.Fatalf("workspace cleanup retries = %v, want [mer]", fc.workspaceCleanupProjects)
 	}
-	if !fc.spawned {
-		t.Fatal("replacement should still spawn when retire notice delivery fails")
+	if len(fc.retired) != 0 || fc.spawned {
+		t.Fatalf("workspace release failure must precede retirement and spawn: retired=%v spawned=%v", fc.retired, fc.spawned)
+	}
+}
+
+func TestSpawnOrchestratorRetirementFailureDoesNotSpawnOrExposeCause(t *testing.T) {
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer"}
+	st.sessions["mer-1"] = domain.SessionRecord{ID: "mer-1", ProjectID: "mer", Kind: domain.KindOrchestrator}
+	fc := &fakeCommander{retireErr: errors.New(`provider stop failed at C:\private\workspace`)}
+	svc := &Service{manager: fc, store: st}
+
+	_, err := svc.SpawnOrchestrator(context.Background(), "mer", true, "", "")
+	var apiError *apierr.Error
+	if !errors.As(err, &apiError) || apiError.Code != "ORCHESTRATOR_REPLACEMENT_FAILED" {
+		t.Fatalf("SpawnOrchestrator error = %v, want safe replacement API error", err)
+	}
+	if strings.Contains(err.Error(), `C:\private\workspace`) || fc.spawned || fc.spawnCalls != 0 {
+		t.Fatalf("retirement failure must hide its cause and block spawn: err=%v spawned=%v calls=%d", err, fc.spawned, fc.spawnCalls)
 	}
 }
 
@@ -3210,7 +3242,7 @@ func TestSpawnOrchestratorPassesApprovalOverrideToSpawn(t *testing.T) {
 	}
 }
 
-func TestSpawnOrchestratorCleanRetireNoticeIsBranchNeutral(t *testing.T) {
+func TestSpawnOrchestratorCleanDoesNotSendRetireNotice(t *testing.T) {
 	st := newFakeStore()
 	st.projects["scratch"] = domain.ProjectRecord{ID: "scratch", Kind: domain.ProjectKindScratch}
 	st.sessions["scratch-1"] = domain.SessionRecord{ID: "scratch-1", ProjectID: "scratch", Kind: domain.KindOrchestrator}
@@ -3220,11 +3252,8 @@ func TestSpawnOrchestratorCleanRetireNoticeIsBranchNeutral(t *testing.T) {
 	if _, err := svc.SpawnOrchestrator(context.Background(), "scratch", true, "", ""); err != nil {
 		t.Fatalf("SpawnOrchestrator: %v", err)
 	}
-	if len(fc.sentMessages) != 1 {
-		t.Fatalf("retire messages = %d, want 1", len(fc.sentMessages))
-	}
-	if strings.Contains(strings.ToLower(fc.sentMessages[0]), "branch") {
-		t.Fatalf("retire notice must be branch-neutral, got %q", fc.sentMessages[0])
+	if len(fc.sentMessages) != 0 {
+		t.Fatalf("retirement must stop the controller locally, not send a model turn: %v", fc.sentMessages)
 	}
 }
 

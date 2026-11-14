@@ -105,6 +105,10 @@ type commander interface {
 	CancelTaskPreparation(context.Context, domain.TaskPreparationToken) error
 }
 
+type orchestratorWorkspaceCleanupRetrier interface {
+	RetryOrchestratorWorkspaceCleanups(context.Context, domain.ProjectID) error
+}
+
 // interfaceTransitionCommander is an optional command capability. Keeping it
 // separate avoids widening every focused session-service fake while production
 // can expose the feature through the concrete Session Manager.
@@ -863,10 +867,15 @@ func (s *Service) SpawnOrchestrator(
 	defer cancelBudget()
 	unlock := s.lockOrchestratorProject(projectID)
 	defer unlock()
+	if retrier, ok := s.manager.(orchestratorWorkspaceCleanupRetrier); ok {
+		if err := retrier.RetryOrchestratorWorkspaceCleanups(ctx, projectID); err != nil {
+			return domain.Session{}, orchestratorReplacementAPIError(err)
+		}
+	}
 
 	mode := requestedMode
 	if clean {
-		existing, err := s.activeOrchestrators(ctx, projectID)
+		existing, err := s.orchestratorsForRetirement(ctx, projectID)
 		if err != nil {
 			return domain.Session{}, err
 		}
@@ -887,12 +896,11 @@ func (s *Service) SpawnOrchestrator(
 		retireCtx := context.WithoutCancel(ctx)
 		for _, orch := range existing {
 			before, live := s.liveSessionBeforeEnd(retireCtx, orch.ID)
-			_ = s.sendRetireNotice(retireCtx, orch.ID)
 			retireErr := s.manager.RetireForReplacement(retireCtx, orch.ID)
 			// A failed cleanup can follow a successful terminal transition.
 			s.recordKillOutcome(retireCtx, before, live, retireErr)
 			if retireErr != nil {
-				return domain.Session{}, toAPIError(retireErr)
+				return domain.Session{}, orchestratorReplacementAPIError(retireErr)
 			}
 		}
 	} else {
@@ -922,18 +930,36 @@ func (s *Service) SpawnOrchestrator(
 	return sess, nil
 }
 
+func (s *Service) orchestratorsForRetirement(ctx context.Context, projectID domain.ProjectID) ([]domain.Session, error) {
+	sessions, err := s.List(ctx, ListFilter{ProjectID: projectID, OrchestratorOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	retiring := sessions[:0]
+	for _, session := range sessions {
+		if !session.IsTerminated {
+			retiring = append(retiring, session)
+		}
+	}
+	return retiring, nil
+}
+
+func orchestratorReplacementAPIError(err error) error {
+	if errors.Is(err, sessionmanager.ErrOrchestratorWorkspaceReleasePending) {
+		return apierr.Unavailable(
+			"ORCHESTRATOR_WORKSPACE_RELEASE_FAILED",
+			"The previous orchestrator has stopped, but its workspace is still being released. No replacement was started.",
+		)
+	}
+	return apierr.Unavailable(
+		"ORCHESTRATOR_REPLACEMENT_FAILED",
+		"Could not safely retire the previous orchestrator. Its workspace was kept and no replacement was started.",
+	)
+}
+
 func (s *Service) activeOrchestrators(ctx context.Context, projectID domain.ProjectID) ([]domain.Session, error) {
 	active := true
 	return s.List(ctx, ListFilter{ProjectID: projectID, Active: &active, OrchestratorOnly: true})
-}
-
-const orchestratorRetireNotice = "AO is replacing this project orchestrator. Stop coordinating new work now; a fresh orchestrator will take over in a new workspace."
-
-func (s *Service) sendRetireNotice(ctx context.Context, id domain.SessionID) error {
-	if err := s.manager.Send(ctx, id, orchestratorRetireNotice, nil); err != nil {
-		return fmt.Errorf("send retire notice to %s: %w", id, err)
-	}
-	return nil
 }
 
 func (s *Service) verifyOrchestratorReplacement(project domain.ProjectRecord, sess domain.Session) error {

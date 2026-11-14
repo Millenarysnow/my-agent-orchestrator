@@ -415,6 +415,12 @@ func (m *Manager) reconcileWorkspaceCleanup(ctx context.Context, id domain.Sessi
 // does, then drops a workspace project's rows as a finished background kill
 // cleanup would.
 func (m *Manager) resumeAcceptedCleanup(ctx context.Context, rec domain.SessionRecord) error {
+	if facts, ok, err := m.store.GetSessionCleanupFacts(ctx, rec.ID); err != nil {
+		return err
+	} else if ok && facts.SessionGeneration == rec.CleanupGeneration &&
+		facts.FailureCode == orchestratorReplacementCleanupFailureCode {
+		return m.retryOrchestratorWorkspaceCleanup(ctx, rec.ID)
+	}
 	rows, workspaceProject, err := m.workspaceProjectRows(ctx, rec)
 	if err != nil {
 		return err

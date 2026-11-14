@@ -9040,6 +9040,142 @@ func TestRetireForReplacementCapturesAndReleasesWorkspace(t *testing.T) {
 	}
 }
 
+type replacementChatLauncher struct {
+	ChatLauncher
+	stop func(context.Context, domain.SessionID) error
+}
+
+func (c replacementChatLauncher) StopChat(ctx context.Context, id domain.SessionID) error {
+	return c.stop(ctx, id)
+}
+
+func TestRetireForReplacementStopsChatBeforeCapturingAndReleasingWorkspace(t *testing.T) {
+	m, st, rt, ws := newLifecycleManager()
+	ws.stashRef = "refs/ao/preserved/mer-chat"
+	var calls []string
+	st.sharedLog = &calls
+	ws.sharedLog = &calls
+	m.chat = replacementChatLauncher{stop: func(context.Context, domain.SessionID) error {
+		calls = append(calls, "StopChat:mer-chat")
+		return nil
+	}}
+	st.sessions["mer-chat"] = domain.SessionRecord{
+		ID: "mer-chat", ProjectID: "mer", Kind: domain.KindOrchestrator, Mode: domain.SessionModeChat,
+		Metadata: domain.SessionMetadata{WorkspacePath: "/ws/mer-chat", Branch: "ao/mer-orchestrator", RuntimeHandleID: "must-not-destroy-runtime"},
+		Activity: domain.Activity{State: domain.ActivityActive},
+	}
+	st.worktrees["mer-chat"] = []domain.SessionWorktreeRecord{{
+		SessionID: "mer-chat", RepoName: domain.RootWorkspaceRepoName, Branch: "ao/mer-orchestrator", WorktreePath: "/ws/mer-chat",
+	}}
+
+	if err := m.RetireForReplacement(ctx, "mer-chat"); err != nil {
+		t.Fatalf("RetireForReplacement err = %v", err)
+	}
+	stopIndex, stashIndex, destroyIndex := -1, -1, -1
+	for i, call := range calls {
+		switch call {
+		case "StopChat:mer-chat":
+			stopIndex = i
+		case "StashUncommitted:mer-chat":
+			stashIndex = i
+		case "ForceDestroy:mer-chat":
+			destroyIndex = i
+		}
+	}
+	if stopIndex < 0 || stashIndex < 0 || destroyIndex < 0 || stopIndex >= stashIndex || stashIndex >= destroyIndex {
+		t.Fatalf("replacement order must stop Chat, capture work, then release workspace: %v", calls)
+	}
+	if rt.destroyed != 0 {
+		t.Fatalf("Chat retirement must use Chat.StopChat, runtime Destroy calls = %d", rt.destroyed)
+	}
+	if !st.sessions["mer-chat"].IsTerminated {
+		t.Fatal("stopped Chat orchestrator must be marked terminated")
+	}
+	if facts, ok := cleanupFacts(t, st, "mer-chat"); !ok || facts.WorkspaceDisposition != domain.DispositionRemoved {
+		t.Fatalf("workspace cleanup facts = %+v, found=%v, want removed", facts, ok)
+	}
+}
+
+func TestRetireForReplacementChatStopFailurePreservesWorkspace(t *testing.T) {
+	m, st, rt, ws := newLifecycleManager()
+	stopErr := errors.New("provider host is still running")
+	m.chat = replacementChatLauncher{stop: func(context.Context, domain.SessionID) error { return stopErr }}
+	st.sessions["mer-chat"] = domain.SessionRecord{
+		ID: "mer-chat", ProjectID: "mer", Kind: domain.KindOrchestrator, Mode: domain.SessionModeChat,
+		Metadata: domain.SessionMetadata{WorkspacePath: "/ws/mer-chat", Branch: "ao/mer-orchestrator"},
+		Activity: domain.Activity{State: domain.ActivityActive},
+	}
+
+	err := m.RetireForReplacement(ctx, "mer-chat")
+	if !errors.Is(err, stopErr) {
+		t.Fatalf("RetireForReplacement err = %v, want Chat stop error", err)
+	}
+	if st.sessions["mer-chat"].IsTerminated || rt.destroyed != 0 || ws.stashCalls != 0 || len(ws.calls) != 0 {
+		t.Fatalf("failed Chat stop must leave session and workspace untouched: terminated=%v runtime=%d stash=%d calls=%v",
+			st.sessions["mer-chat"].IsTerminated, rt.destroyed, ws.stashCalls, ws.calls)
+	}
+	if _, ok := cleanupFacts(t, st, "mer-chat"); ok {
+		t.Fatal("failed Chat stop must not accept workspace cleanup")
+	}
+}
+
+func TestRetireForReplacementRetriesAcceptedWorkspaceRelease(t *testing.T) {
+	m, st, _, ws := newLifecycleManager()
+	ws.forceDestroyErr = errors.New("worktree still registered")
+	st.sessions["mer-orch"] = domain.SessionRecord{
+		ID: "mer-orch", ProjectID: "mer", Kind: domain.KindOrchestrator,
+		Metadata: domain.SessionMetadata{WorkspacePath: "/ws/mer-orch", Branch: "ao/mer-orchestrator"},
+		Activity: domain.Activity{State: domain.ActivityActive},
+	}
+	st.worktrees["mer-orch"] = []domain.SessionWorktreeRecord{{
+		SessionID: "mer-orch", RepoName: domain.RootWorkspaceRepoName, Branch: "ao/mer-orchestrator", WorktreePath: "/ws/mer-orch",
+	}}
+
+	err := m.RetireForReplacement(ctx, "mer-orch")
+	if !errors.Is(err, ErrOrchestratorWorkspaceReleasePending) {
+		t.Fatalf("RetireForReplacement err = %v, want pending workspace release", err)
+	}
+	if facts, ok := cleanupFacts(t, st, "mer-orch"); !ok ||
+		facts.WorkspaceDisposition != domain.DispositionPending || facts.FailureCode != orchestratorReplacementCleanupFailureCode || facts.AttemptCount != 1 {
+		t.Fatalf("cleanup facts = %+v, found=%v, want accepted replacement cleanup", facts, ok)
+	}
+	if !st.sessions["mer-orch"].IsTerminated {
+		t.Fatal("stopped orchestrator must remain terminated while workspace release is pending")
+	}
+
+	ws.forceDestroyErr = nil
+	if err := m.RetryOrchestratorWorkspaceCleanups(ctx, "mer"); err != nil {
+		t.Fatalf("RetryOrchestratorWorkspaceCleanups err = %v", err)
+	}
+	if facts, ok := cleanupFacts(t, st, "mer-orch"); !ok ||
+		facts.WorkspaceDisposition != domain.DispositionRemoved || facts.FailureCode != "" {
+		t.Fatalf("cleanup facts after retry = %+v, found=%v, want removed", facts, ok)
+	}
+}
+
+func TestReplacementWorkspaceCleanupResumesAfterDaemonRestart(t *testing.T) {
+	m, st, _, ws := newLifecycleManager()
+	ws.forceDestroyErr = errors.New("worktree still registered")
+	st.sessions["mer-orch"] = domain.SessionRecord{
+		ID: "mer-orch", ProjectID: "mer", Kind: domain.KindOrchestrator,
+		Metadata: domain.SessionMetadata{WorkspacePath: "/ws/mer-orch", Branch: "ao/mer-orchestrator"},
+		Activity: domain.Activity{State: domain.ActivityActive},
+	}
+
+	err := m.RetireForReplacement(ctx, "mer-orch")
+	if !errors.Is(err, ErrOrchestratorWorkspaceReleasePending) {
+		t.Fatalf("RetireForReplacement err = %v, want pending workspace release", err)
+	}
+	ws.forceDestroyErr = nil
+	if err := m.resumeAcceptedCleanup(ctx, st.sessions["mer-orch"]); err != nil {
+		t.Fatalf("resumeAcceptedCleanup err = %v", err)
+	}
+	if facts, ok := cleanupFacts(t, st, "mer-orch"); !ok ||
+		facts.WorkspaceDisposition != domain.DispositionRemoved || facts.FailureCode != "" {
+		t.Fatalf("cleanup facts after startup retry = %+v, found=%v, want removed", facts, ok)
+	}
+}
+
 func TestRetireForReplacement_NativeTerminationFailurePreservesRuntimeAndWorkspace(t *testing.T) {
 	m, st, rt, ws := newLifecycleManager()
 	agent := &nativeTerminatingAgent{wantID: "native-7", err: errors.New("prime stop failed")}
@@ -9379,8 +9515,8 @@ func TestRetireForReplacementStashFailureLeavesSessionActive(t *testing.T) {
 	if rows := st.worktrees["mer-orch"]; len(rows) != 1 {
 		t.Fatalf("restore markers after preserve failure = %v, want retained", rows)
 	}
-	if rt.destroyed != 0 {
-		t.Fatalf("runtime destroyed = %d, want 0 after preserve failure", rt.destroyed)
+	if rt.destroyed != 1 {
+		t.Fatalf("runtime destroyed = %d, want the agent stopped before preserve", rt.destroyed)
 	}
 	for _, call := range ws.calls {
 		if call == "ForceDestroy:mer-orch" {
@@ -9490,6 +9626,9 @@ func TestRetireForReplacementWorkspaceProjectRuntimeDestroyFailureKeepsRepoInven
 	}
 	if rows := st.worktrees["mer-orch"]; len(rows) != 2 {
 		t.Fatalf("workspace repo inventory after runtime failure = %v, want root and child retained", rows)
+	}
+	if ws.stashCalls != 0 {
+		t.Fatalf("must not capture a workspace while its runtime is still running; stash calls=%d", ws.stashCalls)
 	}
 	for _, call := range ws.calls {
 		if strings.HasPrefix(call, "ForceDestroy:") {
@@ -9628,6 +9767,9 @@ func TestRetireForReplacementRuntimeDestroyFailureBlocksWorkspaceRelease(t *test
 	}
 	if rt.destroyed != 1 || rt.destroyedIDs[0] != "orch-handle" {
 		t.Fatalf("runtime destroyed = %d ids=%v, want one attempt for orch-handle", rt.destroyed, rt.destroyedIDs)
+	}
+	if ws.stashCalls != 0 {
+		t.Fatalf("must not capture a workspace while its runtime is still running; stash calls=%d", ws.stashCalls)
 	}
 	for _, call := range ws.calls {
 		if call == "ForceDestroy:mer-orch" {

@@ -74,6 +74,9 @@ var (
 	// session id have nothing meaningful to restore.
 	ErrNotResumable        = errors.New("session: nothing to resume from")
 	ErrOperationInProgress = errors.New("session: another session operation is in progress")
+	// ErrOrchestratorWorkspaceReleasePending means a stopped Orchestrator's
+	// accepted workspace release still needs retrying.
+	ErrOrchestratorWorkspaceReleasePending = errors.New("session: orchestrator workspace release is still pending")
 	// ErrTargetAgentUnauthorized is returned only when the target adapter's
 	// local auth probe conclusively reports missing or invalid credentials.
 	// Unknown/probe failures remain advisory and are allowed to reach launch.
@@ -2902,6 +2905,9 @@ func (m *Manager) kill(ctx context.Context, id domain.SessionID, backgroundClean
 // This deliberately does not write a session_worktrees row: those rows are
 // boot-restore markers, and a replaced orchestrator must stay terminated.
 func (m *Manager) RetireForReplacement(ctx context.Context, id domain.SessionID) error {
+	if err := m.cancelAsyncChatSpawn(ctx, id); err != nil {
+		return fmt.Errorf("retire replacement %s: cancel provisioning: %w", id, err)
+	}
 	if err := m.beginAgentOperation(ctx, id, agentOperationRetire); err != nil {
 		if errors.Is(err, errAgentOperationInProgress) {
 			err = ErrOperationInProgress
@@ -2920,17 +2926,11 @@ func (m *Manager) RetireForReplacement(ctx context.Context, id domain.SessionID)
 	m.stopPreviewBestEffort(ctx, id)
 	m.destroyBrowserBestEffort(ctx, id)
 	if rec.Metadata.WorkspacePath == "" || rec.Metadata.Branch == "" {
+		if err := m.stopControllerForReplacement(ctx, rec); err != nil {
+			return fmt.Errorf("retire replacement %s: stop controller: %w", id, err)
+		}
 		if err := m.store.DeleteSessionWorktrees(ctx, rec.ID); err != nil {
 			return fmt.Errorf("retire replacement %s: clear restore markers: %w", id, err)
-		}
-		handle := runtimeHandle(rec.Metadata)
-		if err := m.terminateNativeSession(ctx, rec); err != nil {
-			return fmt.Errorf("retire replacement %s: native session: %w", id, err)
-		}
-		if handle.ID != "" {
-			if err := m.runtime.Destroy(ctx, handle); err != nil {
-				return fmt.Errorf("retire replacement %s: runtime: %w", id, err)
-			}
 		}
 		if err := m.lcm.MarkTerminated(ctx, id); err != nil {
 			return fmt.Errorf("retire replacement %s: mark terminated: %w", id, err)
@@ -2950,47 +2950,169 @@ func (m *Manager) RetireForReplacement(ctx context.Context, id domain.SessionID)
 	if release != nil {
 		defer release()
 	}
-	if err := m.terminateNativeSession(ctx, rec); err != nil {
-		return fmt.Errorf("retire replacement %s: native session: %w", id, err)
+	if err := m.stopControllerForReplacement(ctx, rec); err != nil {
+		return fmt.Errorf("retire replacement %s: stop controller: %w", id, err)
 	}
 	if err := m.importAttachments(ctx, rec); err != nil {
 		return fmt.Errorf("retire replacement %s: preserve attachments: %w", id, err)
 	}
-
-	if rows, ok, rowErr := m.workspaceProjectRows(ctx, rec); rowErr != nil {
-		return fmt.Errorf("retire replacement %s: workspace rows: %w", id, rowErr)
-	} else if ok {
-		return m.retireWorkspaceProjectForReplacement(ctx, rec, rows)
+	rows, workspaceProject, err := m.workspaceProjectRows(ctx, rec)
+	if err != nil {
+		return fmt.Errorf("retire replacement %s: workspace rows: %w", id, err)
 	}
-
-	ws := workspaceInfo(rec)
-	staleWorkspace := false
-	if _, err := m.workspace.StashUncommitted(ctx, ws); err != nil {
-		if !errors.Is(err, ports.ErrWorkspaceStale) {
+	if workspaceProject {
+		for _, row := range rows {
+			if _, err := m.workspace.StashUncommitted(ctx, workspaceInfoFromRepoInfo(row)); err != nil &&
+				!errors.Is(err, ports.ErrWorkspaceStale) {
+				return fmt.Errorf("retire replacement %s repo %s: stash: %w", id, row.RepoName, err)
+			}
+		}
+	} else {
+		ws := workspaceInfo(rec)
+		if _, err := m.workspace.StashUncommitted(ctx, ws); err != nil && !errors.Is(err, ports.ErrWorkspaceStale) {
 			return fmt.Errorf("retire replacement %s: stash: %w", id, err)
 		}
-		staleWorkspace = true
-		m.logger.Warn("retire replacement: stale workspace; skipping preserve", "sessionID", id, "path", ws.Path, "error", err)
 	}
-	handle := runtimeHandle(rec.Metadata)
-	if handle.ID != "" {
-		if err := m.runtime.Destroy(ctx, handle); err != nil {
-			return fmt.Errorf("retire replacement %s: runtime: %w", id, err)
-		}
+	if err := m.recordWorkspaceCleanup(ctx, rec, domain.DispositionPending, orchestratorReplacementCleanupFailureCode, false); err != nil {
+		return fmt.Errorf("retire replacement %s: record workspace release: %w", id, err)
 	}
-	if err := m.recordTermination(ctx, rec.ID, true); err != nil {
+	if err := m.recordTermination(ctx, rec.ID, !workspaceProject); err != nil {
 		return err
 	}
+	ws := workspaceInfo(rec)
 	m.runReplacementPreRemove(rec.ID, rec.ProjectID, ws.Path)
 	ctx, cancelWorkspace := context.WithTimeout(context.WithoutCancel(ctx), killTeardownBudget)
 	defer cancelWorkspace()
-	if err := m.workspace.ForceDestroy(ctx, ws); err != nil {
-		if staleWorkspace {
-			m.logger.Warn("retire replacement: stale workspace cleanup failed", "sessionID", id, "path", ws.Path, "error", err)
-		}
-		return fmt.Errorf("retire replacement %s: force destroy: %w", id, err)
+	if err := m.forceDestroyReplacementWorkspace(ctx, rec, rows, workspaceProject); err != nil {
+		return fmt.Errorf("retire replacement %s: %w: %v", id, ErrOrchestratorWorkspaceReleasePending, err)
 	}
-	m.cleanupAgentWorkspace(ctx, rec, ws.Path)
+	return m.recordWorkspaceCleanup(ctx, rec, domain.DispositionRemoved, "", false)
+}
+
+const orchestratorReplacementCleanupFailureCode = "ORCHESTRATOR_REPLACEMENT"
+
+func (m *Manager) stopControllerForReplacement(ctx context.Context, rec domain.SessionRecord) error {
+	if err := m.terminateNativeSession(ctx, rec); err != nil {
+		return fmt.Errorf("native session: %w", err)
+	}
+	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
+		if m.chat == nil {
+			return ErrIncompleteHandle
+		}
+		return m.chat.StopChat(ctx, rec.ID)
+	}
+	handle := runtimeHandle(rec.Metadata)
+	if handle.ID == "" {
+		return nil
+	}
+	if err := m.runtime.Destroy(ctx, handle); err != nil {
+		return fmt.Errorf("runtime: %w", err)
+	}
+	return nil
+}
+
+// RetryOrchestratorWorkspaceCleanups retries only worktree releases accepted
+// by an earlier replacement. It runs before a new Orchestrator can reuse the
+// project's canonical branch or worktree path.
+func (m *Manager) RetryOrchestratorWorkspaceCleanups(ctx context.Context, projectID domain.ProjectID) error {
+	records, err := m.store.ListSessions(ctx, projectID)
+	if err != nil {
+		return fmt.Errorf("list orchestrator replacement cleanup: %w", err)
+	}
+	for _, rec := range records {
+		if rec.Kind != domain.KindOrchestrator || !rec.IsTerminated {
+			continue
+		}
+		facts, ok, err := m.store.GetSessionCleanupFacts(ctx, rec.ID)
+		if err != nil {
+			return fmt.Errorf("read orchestrator replacement cleanup %s: %w", rec.ID, err)
+		}
+		if !ok || facts.SessionGeneration != rec.CleanupGeneration ||
+			facts.WorkspaceDisposition != domain.DispositionPending || facts.FailureCode != orchestratorReplacementCleanupFailureCode {
+			continue
+		}
+		if err := m.retryOrchestratorWorkspaceCleanup(ctx, rec.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *Manager) retryOrchestratorWorkspaceCleanup(ctx context.Context, id domain.SessionID) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), killTeardownBudget)
+	defer cancel()
+	if err := m.beginAgentOperation(ctx, id, agentOperationKill); err != nil {
+		return fmt.Errorf("retry orchestrator workspace release %s: %w: %v", id, ErrOrchestratorWorkspaceReleasePending, err)
+	}
+	defer m.endAgentOperation(id, agentOperationKill)
+	rec, ok, err := m.store.GetSession(ctx, id)
+	if err != nil || !ok || !rec.IsTerminated {
+		return err
+	}
+	facts, found, err := m.store.GetSessionCleanupFacts(ctx, id)
+	if err != nil || !found || facts.SessionGeneration != rec.CleanupGeneration ||
+		facts.WorkspaceDisposition != domain.DispositionPending || facts.FailureCode != orchestratorReplacementCleanupFailureCode {
+		return err
+	}
+	release, closeErr := m.beginShellTerminalTeardown(ctx, id)
+	if closeErr != nil {
+		return m.recordOrchestratorWorkspaceReleaseFailure(ctx, rec, closeErr)
+	}
+	if release != nil {
+		defer release()
+	}
+	rows, workspaceProject, err := m.workspaceProjectRows(ctx, rec)
+	if err == nil {
+		err = m.forceDestroyReplacementWorkspace(ctx, rec, rows, workspaceProject)
+	}
+	if err != nil {
+		return m.recordOrchestratorWorkspaceReleaseFailure(ctx, rec, err)
+	}
+	return m.recordWorkspaceCleanup(ctx, rec, domain.DispositionRemoved, "", false)
+}
+
+func (m *Manager) recordOrchestratorWorkspaceReleaseFailure(ctx context.Context, rec domain.SessionRecord, cause error) error {
+	if err := m.recordWorkspaceCleanup(ctx, rec, domain.DispositionPending, orchestratorReplacementCleanupFailureCode, false); err != nil {
+		cause = errors.Join(cause, err)
+	}
+	return fmt.Errorf("retry orchestrator workspace release %s: %w: %v", rec.ID, ErrOrchestratorWorkspaceReleasePending, cause)
+}
+
+func (m *Manager) forceDestroyReplacementWorkspace(
+	ctx context.Context,
+	rec domain.SessionRecord,
+	rows []ports.WorkspaceRepoInfo,
+	workspaceProject bool,
+) error {
+	release := m.acquireWorkspaceGate(rec.ProjectID)
+	defer release()
+	infos := make([]ports.WorkspaceInfo, 0, len(rows))
+	if workspaceProject {
+		for _, row := range rows {
+			infos = append(infos, workspaceInfoFromRepoInfo(row))
+		}
+	} else if rec.Metadata.WorkspacePath != "" {
+		infos = append(infos, workspaceInfo(rec))
+	}
+	for i := len(infos) - 1; i >= 0; i-- {
+		info := infos[i]
+		inUse, err := m.isWorkspaceInUse(ctx, rec.ProjectID, info.Path, rec.ID)
+		if err != nil {
+			return fmt.Errorf("check replacement workspace ownership: %w", err)
+		}
+		if inUse {
+			return errors.New("replacement workspace is in use by another session")
+		}
+		if err := m.workspace.ForceDestroy(ctx, info); err != nil {
+			return fmt.Errorf("force destroy replacement workspace: %w", err)
+		}
+	}
+	if workspaceProject {
+		if err := m.store.DeleteSessionWorktrees(ctx, rec.ID); err != nil {
+			return fmt.Errorf("clear replacement worktree rows: %w", err)
+		}
+	}
+	m.cleanupAgentWorkspace(ctx, rec, rec.Metadata.WorkspacePath)
 	return nil
 }
 
@@ -3037,44 +3159,6 @@ func (m *Manager) destroyBrowserBestEffort(ctx context.Context, id domain.Sessio
 	if err := m.browser.DestroySession(cleanupCtx, id); err != nil {
 		m.logger.Warn("session browser cleanup failed", "sessionID", id, "error", err)
 	}
-}
-
-func (m *Manager) retireWorkspaceProjectForReplacement(ctx context.Context, rec domain.SessionRecord, rows []ports.WorkspaceRepoInfo) error {
-	staleRepos := make(map[string]bool)
-	for _, row := range rows {
-		if _, err := m.workspace.StashUncommitted(ctx, workspaceInfoFromRepoInfo(row)); err != nil {
-			if !errors.Is(err, ports.ErrWorkspaceStale) {
-				return fmt.Errorf("retire replacement %s repo %s: stash: %w", rec.ID, row.RepoName, err)
-			}
-			staleRepos[row.RepoName] = true
-			m.logger.Warn("retire replacement: stale workspace repo; skipping preserve", "sessionID", rec.ID, "repo", row.RepoName, "path", row.Path, "error", err)
-		}
-	}
-	handle := runtimeHandle(rec.Metadata)
-	if handle.ID != "" {
-		if err := m.runtime.Destroy(ctx, handle); err != nil {
-			return fmt.Errorf("retire replacement %s: runtime: %w", rec.ID, err)
-		}
-	}
-	if err := m.recordTermination(ctx, rec.ID, false); err != nil {
-		return err
-	}
-	m.runReplacementPreRemove(rec.ID, rec.ProjectID, rec.Metadata.WorkspacePath)
-	ctx, cancelWorkspace := context.WithTimeout(context.WithoutCancel(ctx), killTeardownBudget)
-	defer cancelWorkspace()
-	for i := len(rows) - 1; i >= 0; i-- {
-		if err := m.workspace.ForceDestroy(ctx, workspaceInfoFromRepoInfo(rows[i])); err != nil {
-			if staleRepos[rows[i].RepoName] {
-				m.logger.Warn("retire replacement: stale workspace repo cleanup failed", "sessionID", rec.ID, "repo", rows[i].RepoName, "path", rows[i].Path, "error", err)
-			}
-			return fmt.Errorf("retire replacement %s repo %s: force destroy: %w", rec.ID, rows[i].RepoName, err)
-		}
-	}
-	m.cleanupAgentWorkspace(ctx, rec, rec.Metadata.WorkspacePath)
-	if err := m.store.DeleteSessionWorktrees(ctx, rec.ID); err != nil {
-		return fmt.Errorf("retire replacement %s: clear restore markers: %w", rec.ID, err)
-	}
-	return nil
 }
 
 // RestoreWithMode relaunches a torn-down session and reports whether AO used
