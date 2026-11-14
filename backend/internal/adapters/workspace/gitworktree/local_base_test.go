@@ -40,6 +40,29 @@ func TestLocalBaseIncludesUnpushedCommitsWithoutNetwork(t *testing.T) {
 	}
 }
 
+func TestLocalBaseImportStartsAtOriginalCommitWithoutResolvingProjectBase(t *testing.T) {
+	git := requireGit(t)
+	tmp := t.TempDir()
+	repo := setupOriginClone(t, git, tmp)
+	want := gitOutput(t, git, repo, "rev-parse", "HEAD")
+	runGit(t, git, repo, "commit", "--allow-empty", "-m", "later local commit")
+	runGit(t, git, repo, "remote", "remove", "origin")
+	ws, err := New(Options{Binary: git, ManagedRoot: filepath.Join(tmp, "managed"), RepoResolver: StaticRepoResolver{"proj": repo}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := ws.Create(context.Background(), ports.WorkspaceConfig{
+		ProjectID: "proj", SessionID: "imported", Branch: "task/imported", FreshBranch: true,
+		BaseBranch: "refs/heads/deleted", BaseRef: want, StartRef: want,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := gitOutput(t, git, info.Path, "rev-parse", "HEAD"); got != want || info.BaseSHA != want || info.BaseRef != want {
+		t.Fatalf("imported head=%s info=%+v, want original commit %s", got, info, want)
+	}
+}
+
 func TestLocalBaseDeletedDoesNotFallBackToRemote(t *testing.T) {
 	git := requireGit(t)
 	tmp := t.TempDir()

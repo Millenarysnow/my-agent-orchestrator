@@ -362,17 +362,17 @@ func validatePreparationTarget(target gitPreparationTarget) error {
 		}
 	}
 	if required[GitPreparationActionCreateRemoteRepository] && target.Input.GitHubRepository == nil && strings.TrimSpace(target.Input.RemoteURL) == "" {
-		return apierr.Invalid("IMPORT_GITHUB_REPOSITORY_REQUIRED", "GitHub repository owner and name are required before AO can create an origin remote.", map[string]any{"repoPath": target.Status.RepoPath})
+		return apierr.Invalid("IMPORT_GITHUB_REPOSITORY_REQUIRED", "GitHub repository owner and name are required before Orchestrator can create an origin remote.", map[string]any{"repoPath": target.Status.RepoPath})
 	}
 	if required[GitPreparationActionCreateRemoteRepository] && target.Input.GitHubRepository != nil {
 		owner := strings.TrimSpace(target.Input.GitHubRepository.Owner)
 		name := strings.TrimSpace(target.Input.GitHubRepository.Name)
 		if owner == "" || name == "" {
-			return apierr.Invalid("IMPORT_GITHUB_REPOSITORY_REQUIRED", "GitHub repository owner and name are required before AO can create an origin remote.", map[string]any{"repoPath": target.Status.RepoPath})
+			return apierr.Invalid("IMPORT_GITHUB_REPOSITORY_REQUIRED", "GitHub repository owner and name are required before Orchestrator can create an origin remote.", map[string]any{"repoPath": target.Status.RepoPath})
 		}
 	}
 	if required[GitPreparationActionSetRemote] && strings.TrimSpace(target.Input.RemoteURL) == "" {
-		return apierr.Invalid("IMPORT_REMOTE_URL_REQUIRED", "remoteUrl is required before AO can add an origin remote.", map[string]any{"repoPath": target.Status.RepoPath})
+		return apierr.Invalid("IMPORT_REMOTE_URL_REQUIRED", "remoteUrl is required before Orchestrator can add an origin remote.", map[string]any{"repoPath": target.Status.RepoPath})
 	}
 	if required[GitPreparationActionSetRemote] || (required[GitPreparationActionCreateRemoteRepository] && target.Input.GitHubRepository == nil) {
 		if err := validateImportRemoteURL(target.Input.RemoteURL); err != nil {
