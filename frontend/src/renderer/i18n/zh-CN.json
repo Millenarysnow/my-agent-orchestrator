@@ -1675,6 +1675,7 @@
 	"settings.updates.channel.stable": "稳定版",
 	"settings.updates.channelSwitchUpdate": "更新并重启以切换到{{channel}}。",
 	"settings.updates.check": "检查更新",
+	"settings.updates.disabledInBuild": "当前构建已禁用应用更新。",
 	"settings.updates.checking": "正在检查更新…",
 	"settings.updates.checksFailing": "检查更新持续失败，应用无法确认是否有新版本。",
 	"settings.updates.checksForUpdates": "检查更新",

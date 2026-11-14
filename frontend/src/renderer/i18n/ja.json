@@ -1706,6 +1706,7 @@
 	"settings.updates.lastChecked": "最終確認: {{time}}",
 	"settings.updates.latest": "最新バージョンを利用中です。",
 	"settings.updates.needInstalledApp": "アップデートにはインストール済みのアプリが必要です。",
+	"settings.updates.disabledInBuild": "このビルドではアプリの更新が無効になっています。",
 	"settings.updates.noFeatureReleases": "公開中の機能リリースはありません。",
 	"settings.updates.notChecked": "更新はまだ確認されていません。",
 	"settings.updates.networkStale": "しばらくアップデートを確認できていません。アプリを再起動すると通常は解決します。",

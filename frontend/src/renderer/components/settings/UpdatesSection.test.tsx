@@ -6,6 +6,9 @@ import { useUiStore } from "../../stores/ui-store";
 import type { UpdateStatus } from "../../../main/update-settings";
 import { appI18n } from "../../i18n";
 
+const updatePolicy = vi.hoisted(() => ({ enabled: true }));
+vi.mock("../../../shared/app-update-policy", () => ({ get APP_UPDATES_ENABLED() { return updatePolicy.enabled; } }));
+
 const {
 	updGetStatus,
 	updOnStatus,
@@ -66,6 +69,7 @@ function renderUpdates() {
 }
 
 beforeEach(() => {
+	updatePolicy.enabled = true;
 	for (const m of [updGetStatus, updOnStatus, updDownload, settingsGet, settingsSet, getVersion, featureBuildsList, featureBuildsGetActive, telemetryCapture]) {
 		m.mockReset();
 	}
@@ -77,6 +81,28 @@ beforeEach(() => {
 	featureBuildsGetActive.mockResolvedValue(null);
 	updGetStatus.mockResolvedValue({ state: "idle" } satisfies UpdateStatus);
 	useUiStore.setState({ developerMode: false });
+});
+
+it("keeps the installed version but disables all update actions despite saved opt-in and staged bytes", async () => {
+	updatePolicy.enabled = false;
+	settingsGet.mockResolvedValue({ enabled: true, channel: "nightly", nightlyAck: true, feature: { pr: 2270 } });
+	updGetStatus.mockResolvedValue({ state: "downloaded", staged: { version: "2.0.0", stagedAt: 1, escalated: true } });
+	useUiStore.setState({ developerMode: true });
+	renderUpdates();
+
+	expect(await screen.findByLabelText("Current version - v0.12.11-nightly.202609070300")).toBeVisible();
+	expect(screen.getByText("Application updates are disabled in this build.")).toBeVisible();
+	const automatic = screen.getByRole("switch", { name: "Automatic updates" });
+	expect(automatic).toBeDisabled();
+	expect(automatic).not.toBeChecked();
+	expect(screen.getByRole("button", { name: "Check for updates" })).toBeDisabled();
+	expect(screen.getByRole("button", { name: appI18n.t("settings.updates.channel") })).toBeDisabled();
+	expect(screen.queryByRole("button", { name: "Restart & install" })).toBeNull();
+	expect(screen.queryByRole("button", { name: /Return to/ })).toBeNull();
+	expect(featureBuildsList).not.toHaveBeenCalled();
+	expect(settingsSet).not.toHaveBeenCalled();
+	fireEvent.click(automatic);
+	expect(settingsSet).not.toHaveBeenCalled();
 });
 
 it("renders the installed nightly build time as the device-local instant", async () => {

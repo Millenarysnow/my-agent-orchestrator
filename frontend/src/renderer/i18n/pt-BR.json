@@ -1731,6 +1731,7 @@
 	"settings.updates.lastChecked": "Última verificação: {{time}}",
 	"settings.updates.latest": "Você está na versão mais recente.",
 	"settings.updates.needInstalledApp": "As atualizações exigem o app instalado.",
+	"settings.updates.disabledInBuild": "As atualizações do aplicativo estão desativadas nesta compilação.",
 	"settings.updates.noFeatureReleases": "Nenhum release de feature ativo.",
 	"settings.updates.notChecked": "Nenhuma verificação de atualização ainda.",
 	"settings.updates.networkStale": "Não foi possível verificar atualizações por um tempo — reiniciar o app geralmente resolve.",

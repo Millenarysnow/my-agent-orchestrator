@@ -12,6 +12,9 @@ import { useTelemetryPolicyStore } from "../stores/telemetry-policy-store";
 import { useAnalyticsOptOutStore } from "../stores/analytics-opt-out-store";
 import { TooltipProvider } from "./ui/tooltip";
 
+// These tests exercise the original settings behavior in builds with updates enabled.
+vi.mock("../../shared/app-update-policy", () => ({ APP_UPDATES_ENABLED: true }));
+
 const { harnessSettingsSectionMock } = vi.hoisted(() => ({ harnessSettingsSectionMock: vi.fn() }));
 
 vi.mock("./settings/HarnessSettingsSection", () => ({

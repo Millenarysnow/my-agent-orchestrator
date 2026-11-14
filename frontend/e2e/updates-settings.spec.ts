@@ -1,5 +1,28 @@
 import { expect, test } from "@playwright/test";
 import { installFakeBridge } from "./support/fake-bridge";
+import { APP_UPDATES_ENABLED } from "../src/shared/app-update-policy";
+
+test("@P0 a disabled build keeps version information and blocks update controls", async ({ page }) => {
+	test.skip(APP_UPDATES_ENABLED, "This scenario covers builds without application updates.");
+	await installFakeBridge(page, {
+		version: "1.0.0",
+		updateSettings: { enabled: true, channel: "nightly", nightlyAck: true, feature: { pr: 2270 } },
+		updateStatus: { state: "downloaded", version: "2.0.0" },
+	});
+	await page.goto("/#/settings");
+	await page.getByRole("button", { name: "Updates", exact: true }).click();
+	await expect(page.getByTestId("app-version")).toHaveText("v1.0.0");
+	await expect(page.getByTestId("update-status-line")).toHaveText("Application updates are disabled in this build.");
+	await expect(page.getByRole("button", { name: "Check for updates" })).toBeDisabled();
+	await expect(page.getByRole("switch", { name: "Automatic updates" })).toBeDisabled();
+	await expect(page.getByRole("switch", { name: "Automatic updates" })).not.toBeChecked();
+	await expect(page.getByRole("button", { name: "Updates channel", exact: true })).toBeDisabled();
+	await expect(page.getByRole("button", { name: "Restart & install", exact: true })).toHaveCount(0);
+	await expect(page.getByRole("button", { name: /Return to/ })).toHaveCount(0);
+});
+
+test.describe("builds with application updates", () => {
+	test.skip(!APP_UPDATES_ENABLED, "Application updates are disabled by the build policy.");
 
 test("downloaded update keeps the full version readable and actions aligned", async ({ page }) => {
 	await page.setViewportSize({ width: 1010, height: 700 });
@@ -144,3 +167,5 @@ for (const [label, version, settingsText, sidebarLabel, shortVersion] of [
 		expect(await page.locator("body").innerText()).not.toMatch(/\bvv\d/);
 	});
 }
+
+});

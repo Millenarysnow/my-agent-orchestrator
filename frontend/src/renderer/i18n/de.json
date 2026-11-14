@@ -1706,6 +1706,7 @@
 	"settings.updates.lastChecked": "Zuletzt geprüft: {{time}}",
 	"settings.updates.latest": "Sie verwenden die neueste Version.",
 	"settings.updates.needInstalledApp": "Updates erfordern die installierte App.",
+	"settings.updates.disabledInBuild": "Anwendungsupdates sind in diesem Build deaktiviert.",
 	"settings.updates.noFeatureReleases": "Keine aktiven Feature-Releases.",
 	"settings.updates.notChecked": "Noch nicht nach Updates gesucht.",
 	"settings.updates.networkStale": "Updates konnten seit einiger Zeit nicht geprüft werden — ein Neustart der App behebt das Problem meist.",

@@ -2058,6 +2058,7 @@
 	"settings.updates.lastChecked": "Last checked {{time}}",
 	"settings.updates.latest": "You're on the latest version.",
 	"settings.updates.needInstalledApp": "Updates need the installed app.",
+	"settings.updates.disabledInBuild": "Application updates are disabled in this build.",
 	"settings.updates.noFeatureReleases": "No live feature releases.",
 	"settings.updates.notChecked": "Updates haven't been checked yet.",
 	"settings.updates.networkStale": "Updates haven't been able to check for a while — restarting the app usually fixes this.",

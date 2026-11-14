@@ -9,6 +9,7 @@ import { useUiStore } from "../../stores/ui-store";
 import { useRequestUpdateInstall } from "../../hooks/useRequestUpdateInstall";
 import { useUpdateStatus, requestUpdateDownload } from "../../hooks/useUpdateStatus";
 import type { UpdateChannel, UpdateSettings, UpdateState, UpdateStatus } from "../../../main/update-settings";
+import { APP_UPDATES_ENABLED } from "../../../shared/app-update-policy";
 import { localizedUpdateError } from "../../lib/update-error-copy";
 import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
@@ -45,7 +46,7 @@ export function UpdatesSection({ titleHidden }: { titleHidden?: boolean } = {}) 
 	const query = useQuery({
 		queryKey: updateSettingsQueryKey,
 		queryFn: () => aoBridge.updateSettings.get(),
-		refetchInterval: 3_000,
+		refetchInterval: APP_UPDATES_ENABLED ? 3_000 : false,
 	});
 
 	const [form, setForm] = useState<UpdateSettings>(DEFAULT_SETTINGS);
@@ -256,14 +257,16 @@ export function UpdatesSection({ titleHidden }: { titleHidden?: boolean } = {}) 
 		<>
 			<SettingsSection title={t("settings.updates.versionSection")} sectionId="updates" titleHidden={titleHidden} grouped>
 				<UpdateActions
-					status={manualCheckFailure ? { ...status, state: "error", message: manualCheckFailure, errorInfo: undefined } : status}
+					status={!APP_UPDATES_ENABLED
+						? { state: "unsupported", message: t("settings.updates.disabledInBuild") }
+						: manualCheckFailure ? { ...status, state: "error", message: manualCheckFailure, errorInfo: undefined } : status}
 					manualCheckRequestId={manualCheckRequestId}
 					startManualCheck={startManualCheck}
 					finishManualCheck={finishManualCheck}
 					channelSwitch={channelSwitch}
 				/>
 
-				{featurePr != null && (
+				{APP_UPDATES_ENABLED && featurePr != null && (
 					<SettingsRow
 						label={activeBuild
 							? t("settings.updates.onFeatureBuild", { pr: featurePr })
@@ -284,9 +287,9 @@ export function UpdatesSection({ titleHidden }: { titleHidden?: boolean } = {}) 
 				>
 					<Switch
 						aria-label={t("settings.updates.automatic")}
-						checked={form.enabled}
+						checked={APP_UPDATES_ENABLED && form.enabled}
 						onCheckedChange={setEnabled}
-						disabled={savingField === "automatic"}
+						disabled={!APP_UPDATES_ENABLED || savingField === "automatic"}
 					/>
 				</SettingsRow>
 
@@ -295,7 +298,7 @@ export function UpdatesSection({ titleHidden }: { titleHidden?: boolean } = {}) 
 					description={
 						<>
 							{t("settings.updates.channelHelp")}
-							{primaryValue === "nightly" && (
+							{APP_UPDATES_ENABLED && primaryValue === "nightly" && (
 								// A standing property of the chosen channel, not an alert:
 								// --color-warning is one step from --destructive, and a
 								// permanent note in it read as a permanent failure. Red is
@@ -313,11 +316,11 @@ export function UpdatesSection({ titleHidden }: { titleHidden?: boolean } = {}) 
 						value={primaryValue}
 						options={developerMode ? channelOptions : channelOptions.filter((option) => option.value !== "feature")}
 						onChange={handlePrimaryChannel}
-						disabled={savingField === "channel"}
+						disabled={!APP_UPDATES_ENABLED || savingField === "channel"}
 					/>
 				</SettingsRow>
 
-				{primaryValue === "feature" && (
+				{APP_UPDATES_ENABLED && primaryValue === "feature" && (
 					<FeatureBuildsSelect
 						currentPr={form.feature?.pr ?? null}
 						onPin={(pr, title) => setPendingPin({ pr, title })}
@@ -579,7 +582,7 @@ function UpdateActions({
 						variant="quiet"
 						size="sm"
 						onClick={() => void checkNow()}
-						disabled={busy}
+						disabled={!APP_UPDATES_ENABLED || busy}
 					>
 						{checking ? (
 							<Loader2 className="size-icon-sm animate-spin motion-reduce:animate-none" aria-hidden="true" />

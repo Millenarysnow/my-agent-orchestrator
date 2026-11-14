@@ -2120,6 +2120,7 @@
 	"settings.updates.lastChecked": "Последняя проверка: {{time}}",
 	"settings.updates.latest": "У вас установлена последняя версия.",
 	"settings.updates.needInstalledApp": "Обновления доступны только в установленном приложении.",
+	"settings.updates.disabledInBuild": "Обновления приложения отключены в этой сборке.",
 	"settings.updates.noFeatureReleases": "Активных функциональных релизов нет.",
 	"settings.updates.notChecked": "Обновления ещё не проверялись.",
 	"settings.updates.networkStale": "Давно не удаётся проверить обновления — обычно помогает перезапуск приложения.",
