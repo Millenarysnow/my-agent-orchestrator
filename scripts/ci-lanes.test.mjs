@@ -55,6 +55,14 @@ test('packages/shared reaches the frontend and mobile, with all vitest files', (
   assert.equal(pick.vitest, 'all');
 });
 
+test('the shared app update policy validates Go and the full frontend suite', () => {
+  const policy = 'backend/internal/buildpolicy/app-updates.json';
+  const pick = pickLanes(pr([policy]));
+  assert.deepEqual(pick.lanes, ['go', 'cli-e2e', 'frontend']);
+  assert.equal(pick.vitest, 'all');
+  assert.equal(pickLanes(pr([policy, 'frontend/src/main/a.ts'])).vitest, 'all');
+});
+
 test('the renderer typechecks against cloud-client types', () => {
   assert.deepEqual(pickLanes(pr(['packages/cloud-client/src/types.ts'])).lanes, ['frontend', 'boundary', 'cloud']);
   assert.deepEqual(pickLanes(pr(['contracts/cloud/openapi.yaml'])).lanes, ['cloud']);

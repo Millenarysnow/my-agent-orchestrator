@@ -2,11 +2,12 @@ import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 
 const FRONTEND = /^(frontend\/(?!src\/docs\/|native\/)|packages\/(product-ui|shared|cloud-client)\/)/;
+const APP_UPDATE_POLICY = /^backend\/internal\/buildpolicy\/app-updates\.json$/;
 
 export const LANES = {
   go: [/^backend\//, /^pricing\//, /^go\.work(\.sum)?$/, /^contracts\/session-start-interface\.json$/, /^frontend\/scripts\/prepare-cloudflared\.mjs$/, /^frontend\/src\/api\/schema\.ts$/, /^package(-lock)?\.json$/, /^\.github\/scripts\/go-test-parallel\.sh$/],
   'cli-e2e': [/^backend\//, /^test\/cli\//],
-  frontend: [FRONTEND],
+  frontend: [FRONTEND, APP_UPDATE_POLICY],
   docs: [/^frontend\/src\/docs\//],
   boundary: [FRONTEND, /^backend\/internal\/httpd\//],
   cloud: [/^packages\/cloud-client\//, /^contracts\/cloud\//],
@@ -35,7 +36,7 @@ export function pickLanes({ event, draft = false, base = 'main', fork = false, l
   const hit = lane => paths.some(path => LANES[lane].some(rule => rule.test(path)));
   const macos = full || labels.includes('ci:macos') || hit('mac-native');
   const lanes = Object.keys(LANES).filter(lane => (lane === 'mac-native' ? macos : every || hit(lane)));
-  return { lanes, full, macos, vitest: vitestTarget(lanes, every || paths.some(path => ALL_VITEST.test(path)), files) };
+  return { lanes, full, macos, vitest: vitestTarget(lanes, every || paths.some(path => ALL_VITEST.test(path) || APP_UPDATE_POLICY.test(path)), files) };
 }
 
 function vitestTarget(lanes, all, files) {
