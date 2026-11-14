@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -50,6 +51,91 @@ func makeBundle(t *testing.T, name string) string {
 		t.Fatal(err)
 	}
 	return p
+}
+
+func TestStart_DisabledBuildDoesNotFetchMissingApp(t *testing.T) {
+	for _, args := range [][]string{{"start"}, {"start", "--json"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			setConfigEnv(t)
+			oldScan, oldPreferred, oldPolicy := appScanLocations, preferredAppPath, appUpdatesEnabled
+			appScanLocations = func() []string { return nil }
+			preferredAppPath = func() string { return "" }
+			appUpdatesEnabled = func() bool { return false }
+			t.Cleanup(func() {
+				appScanLocations, preferredAppPath, appUpdatesEnabled = oldScan, oldPreferred, oldPolicy
+			})
+			deps := Deps{HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				t.Fatal("disabled build attempted an application download")
+				return nil, nil
+			})}}
+			out, _, err := executeCLI(t, deps, args...)
+			if err == nil || !strings.Contains(err.Error(), "install this fork's desktop package first") {
+				t.Fatalf("error = %v, want disabled-download guidance", err)
+			}
+			if out != "" {
+				t.Fatalf("stdout = %q, want empty output on failure", out)
+			}
+		})
+	}
+}
+
+func TestStart_DisabledBuildOpensInstalledApp(t *testing.T) {
+	cfg := setConfigEnv(t)
+	bundle := makeBundle(t, appBundleName)
+	writeMarker(t, cfg, bundle)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	oldScan, oldPreferred, oldPolicy := appScanLocations, preferredAppPath, appUpdatesEnabled
+	appScanLocations = func() []string { return nil }
+	preferredAppPath = func() string { return "" }
+	appUpdatesEnabled = func() bool { return false }
+	t.Cleanup(func() {
+		appScanLocations, preferredAppPath, appUpdatesEnabled = oldScan, oldPreferred, oldPolicy
+	})
+	var launched bool
+	deps := Deps{
+		StartProcess: func(cfg processStartConfig) error {
+			launched = cfg.Path == bundle
+			return nil
+		},
+		CommandOutput: func(_ context.Context, name string, _ ...string) ([]byte, error) {
+			if name == "open" {
+				launched = true
+			}
+			return []byte(linuxDesktopEntryName + "\n"), nil
+		},
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			t.Fatal("local launch attempted an application download")
+			return nil, nil
+		})},
+	}
+	out, _, err := executeCLI(t, deps, "start", "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result startResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !launched || !result.Resolved || result.Fetched || !result.Opened || result.AppPath != bundle {
+		t.Fatalf("launch = %v, result = %+v", launched, result)
+	}
+}
+
+func TestFetchApp_EnabledBuildRetainsDownloadPath(t *testing.T) {
+	setConfigEnv(t)
+	oldPolicy := appUpdatesEnabled
+	appUpdatesEnabled = func() bool { return true }
+	t.Cleanup(func() { appUpdatesEnabled = oldPolicy })
+	wantErr := errors.New("test download stopped before installation")
+	var requested bool
+	c := &commandContext{deps: Deps{HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		requested = true
+		return nil, wantErr
+	})}}.withDefaults()}
+	_, err := c.fetchApp(context.Background(), io.Discard)
+	if !requested || !errors.Is(err, wantErr) {
+		t.Fatalf("requested = %v, error = %v, want original download path", requested, err)
+	}
 }
 
 func TestResolveApp_MarkerHit(t *testing.T) {

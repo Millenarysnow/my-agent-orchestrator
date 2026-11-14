@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/buildpolicy"
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 )
 
@@ -29,6 +30,9 @@ import (
 // is not a contract: the same staleness that stranded the baked update feed
 // (#3523) would strand every `ao start` download the day that redirect stops.
 var releaseRepo = "Untrivial-ai/agent-orchestrator"
+
+// A function seam keeps bootstrap tests independent of the shipped build policy.
+var appUpdatesEnabled = buildpolicy.AppUpdatesEnabled
 
 // appBundleName is the macOS bundle directory name produced by electron-forge
 // (spaced, per frontend/forge.config.ts).
@@ -65,14 +69,21 @@ type startResult struct {
 
 func newStartCommand(ctx *commandContext) *cobra.Command {
 	opts := startOptions{}
+	short := "Fetch (if needed) and open the Agent Orchestrator desktop app"
+	long := "Fetch (if needed) and open the Agent Orchestrator desktop app.\n\n" +
+		"The desktop app now owns the daemon, state, and updates. `ao start` no\n" +
+		"longer runs a daemon: it resolves the installed app (or downloads the\n" +
+		"latest release), opens it, and exits."
+	if !appUpdatesEnabled() {
+		short = "Open the installed Agent Orchestrator desktop app"
+		long = short + ".\n\nApplication downloads and updates are disabled in this build.\n" +
+			"Install this fork's desktop package first; ao start only opens a local installation."
+	}
 	cmd := &cobra.Command{
 		Use:   "start",
-		Short: "Fetch (if needed) and open the Agent Orchestrator desktop app",
-		Long: "Fetch (if needed) and open the Agent Orchestrator desktop app.\n\n" +
-			"The desktop app now owns the daemon, state, and updates. `ao start` no\n" +
-			"longer runs a daemon: it resolves the installed app (or downloads the\n" +
-			"latest release), opens it, and exits.",
-		Args: noArgs,
+		Short: short,
+		Long:  long,
+		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return ctx.runStart(cmd.Context(), cmd, opts)
 		},
@@ -369,6 +380,9 @@ func isUsableBundle(p string) bool {
 // Windows runs the NSIS installer silently, and Linux drops a chmod'd AppImage at
 // a stable path.
 func (c *commandContext) fetchApp(ctx context.Context, w io.Writer) (string, error) {
+	if !appUpdatesEnabled() {
+		return "", fmt.Errorf("ao start: application downloads and updates are disabled in this build; install this fork's desktop package first")
+	}
 	switch runtime.GOOS {
 	case "darwin":
 		return c.fetchAppDarwin(ctx, w)
@@ -720,6 +734,10 @@ func (c *commandContext) openApp(ctx context.Context, appPath string) (bool, err
 // printDeprecationNotice explains the new role of the npm `ao` binary. Keep it
 // honest: Track B (live auto-update) is not done, so it does not promise it.
 func (c *commandContext) printDeprecationNotice(w io.Writer) {
+	if !appUpdatesEnabled() {
+		_, _ = fmt.Fprint(w, "Agent Orchestrator is a desktop app. This build opens local installations only; application downloads and updates are disabled.\n")
+		return
+	}
 	_, _ = fmt.Fprint(w, "Agent Orchestrator is now a desktop app, and the npm `ao` is just its launcher.\n"+
 		"The app is distributed from the website and GitHub Releases; it owns the daemon and updates itself.\n"+
 		"You can keep running `ao start` to fetch (if needed) and open it.\n")
