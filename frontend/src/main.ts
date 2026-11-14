@@ -4422,7 +4422,7 @@ app.whenReady().then(async () => {
 	if (browserQuitRequested) return;
 	// Not awaited: launch must not wait on this network fetch (up to 10 s). It
 	// runs once the window exists so its dialogs attach to it.
-	if (app.isPackaged) {
+	if (APP_UPDATES_ENABLED && app.isPackaged) {
 		void import("./main/desktop-version-floor")
 			.then(({ checkDesktopVersionFloor }) => checkDesktopVersionFloor({
 					parent: () => mainWindow,

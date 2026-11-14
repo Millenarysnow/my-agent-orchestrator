@@ -8,12 +8,14 @@ describe("checkDesktopVersionFloor", () => {
   });
 
   async function importModule(options: {
+    appUpdatesEnabled?: boolean;
     isPackaged?: boolean;
     version?: string;
     floor?: { min?: string; latest?: string; downloadUrl?: string };
     fetchError?: boolean;
     fetchStatus?: number;
   } = {}) {
+    vi.doMock("../shared/app-update-policy", () => ({ APP_UPDATES_ENABLED: options.appUpdatesEnabled ?? true }));
     const dialog = { showMessageBox: vi.fn(() => Promise.resolve({ response: 1 })) };
     const shellMock = { openExternal: vi.fn(() => Promise.resolve()) };
     const quit = vi.fn();
@@ -45,6 +47,26 @@ describe("checkDesktopVersionFloor", () => {
     const { mod, fetchMock } = await importModule({ isPackaged: false });
     await mod.checkDesktopVersionFloor();
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not fetch, prompt, quit or schedule a forced update in a disabled build", async () => {
+    vi.useFakeTimers();
+    try {
+      const { mod, fetchMock, dialog, shellMock, quit } = await importModule({
+        appUpdatesEnabled: false,
+        version: "0.12.12",
+        floor: { min: "99.0.0", latest: "100.0.0" },
+      });
+      const requestedQuit = vi.fn();
+      await mod.checkDesktopVersionFloor({ quit: requestedQuit });
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(dialog.showMessageBox).not.toHaveBeenCalled();
+      expect(shellMock.openExternal).not.toHaveBeenCalled();
+      expect(quit).not.toHaveBeenCalled();
+      expect(requestedQuit).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
   });
 
   it("does nothing when floor is empty", async () => {

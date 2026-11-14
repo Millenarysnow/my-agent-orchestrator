@@ -1,5 +1,6 @@
 import { app, dialog, shell, type BaseWindow, type MessageBoxOptions } from "electron";
 import semver from "semver";
+import { APP_UPDATES_ENABLED } from "../shared/app-update-policy";
 
 const FLOOR_URL =
   "https://raw.githubusercontent.com/Untrivial-ai/agent-orchestrator/main/desktop-version-floor.json";
@@ -65,7 +66,7 @@ async function requireUpdate(options: FloorOptions, running: string, minVersion:
 }
 
 export async function checkDesktopVersionFloor(options: FloorOptions = {}): Promise<void> {
-  if (!app.isPackaged) return;
+  if (!APP_UPDATES_ENABLED || !app.isPackaged) return;
   let floor: Floor;
   try {
     const response = await fetch(FLOOR_URL, {
