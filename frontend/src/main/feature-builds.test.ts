@@ -1,7 +1,23 @@
 // @vitest-environment node
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { listFeatureBuilds, parseFeatureBuild, reconcileFeaturePin } from "./feature-builds";
 import type { UpdateSettings } from "./update-settings";
+
+const policy = vi.hoisted(() => ({ enabled: true }));
+vi.mock("../shared/app-update-policy", () => ({ get APP_UPDATES_ENABLED() { return policy.enabled; } }));
+beforeEach(() => { policy.enabled = true; });
+
+it("preserves a pin and skips feature discovery when this build disables updates", async () => {
+	policy.enabled = false;
+	const fetch = vi.fn();
+	vi.stubGlobal("fetch", fetch);
+	try {
+		const settings: UpdateSettings = { enabled: true, channel: "nightly", nightlyAck: true, feature: { pr: 2270 } };
+		expect(await listFeatureBuilds()).toEqual([]);
+		expect(await reconcileFeaturePin(settings)).toEqual({ settings, cleared: false });
+		expect(fetch).not.toHaveBeenCalled();
+	} finally { vi.unstubAllGlobals(); }
+});
 
 // Mock the electron module so `app.getVersion()` works outside Electron.
 vi.mock("electron", () => ({

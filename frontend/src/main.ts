@@ -52,6 +52,7 @@ import { TelemetryPolicyAuthority, resolveDesktopDataDir } from "./main/telemetr
 import { DesktopTelemetryController } from "./main/desktop-telemetry-controller";
 import { TelemetryIdentityController } from "./main/telemetry-identity";
 import { readUpdateSettings, type UpdateSettings, type UpdateStatus } from "./main/update-settings";
+import { APP_UPDATES_ENABLED } from "./shared/app-update-policy";
 import { readKeybindingOverrides, writeKeybindingOverrides } from "./main/keybinding-settings";
 import { readEditorSettings, writeEditorPreference } from "./main/editor-settings";
 import { createEditorHandoff } from "./main/editor-handoff";
@@ -4189,7 +4190,7 @@ app.on("second-instance", (_event, argv) => {
 // A live updater additionally requires a signed + notarized build — see
 // frontend/docs/desktop-release.md.
 function initAutoUpdates(): void {
-	if (!app.isPackaged) return;
+	if (!APP_UPDATES_ENABLED || !app.isPackaged) return;
 	const runFile = runFilePath();
 	if (!runFile) return;
 	const stateDir = path.dirname(runFile);

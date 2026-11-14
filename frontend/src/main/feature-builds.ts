@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { app } from "electron";
 import type { UpdateSettings } from "./update-settings";
+import { APP_UPDATES_ENABLED } from "../shared/app-update-policy";
 
 const GITHUB_API = "https://api.github.com";
 
@@ -201,6 +202,7 @@ async function collectFeatureBuilds(): Promise<FeatureBuild[]> {
  * for the filter/group semantics.
  */
 export async function listFeatureBuilds(): Promise<FeatureBuild[]> {
+	if (!APP_UPDATES_ENABLED) return [];
 	try {
 		return await collectFeatureBuilds();
 	} catch (err) {
@@ -219,6 +221,7 @@ export async function listFeatureBuilds(): Promise<FeatureBuild[]> {
 export async function reconcileFeaturePin(
 	settings: UpdateSettings,
 ): Promise<{ settings: UpdateSettings; cleared: boolean }> {
+	if (!APP_UPDATES_ENABLED) return { settings, cleared: false };
 	if (!settings.feature) return { settings, cleared: false };
 	let builds: FeatureBuild[];
 	try {

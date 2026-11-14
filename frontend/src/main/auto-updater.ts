@@ -1,5 +1,6 @@
 import { autoUpdater as stockAutoUpdater } from "electron-updater";
 import { StableGitHubProvider } from "./stable-github-provider";
+import { APP_UPDATES_ENABLED, APP_UPDATES_DISABLED_MESSAGE } from "../shared/app-update-policy";
 import { MacDifferentialV2Updater } from "./mac-differential-v2-updater";
 import macV2TrustedKeys from "../../scripts/mac-differential-v2-trust.json";
 import macDifferentialRollout from "../../scripts/mac-differential-rollout.json";
@@ -55,6 +56,19 @@ const autoUpdater = process.platform === "darwin" && macDifferentialRollout.enab
   ? new MacDifferentialV2Updater({ trustedKeys: macV2TrustedKeys })
   : stockAutoUpdater;
 
+// Apply the build policy before any entry point can wire events or restore a
+// remembered update. In particular, quitting must not install cached upstream bytes.
+if (!APP_UPDATES_ENABLED) {
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = false;
+}
+
+function updatesDisabled(requestId?: string): boolean {
+  if (APP_UPDATES_ENABLED) return false;
+  broadcast({ state: "unsupported", message: APP_UPDATES_DISABLED_MESSAGE, requestId });
+  return true;
+}
+
 const FAIL_CLOSED_UPDATE_SETTINGS: UpdateSettings = {
   enabled: false,
   channel: "latest",
@@ -93,6 +107,7 @@ export function applyUpdaterPolicy(
   settings: UpdateSettings,
   platform: NodeJS.Platform = process.platform,
 ): void {
+  if (!APP_UPDATES_ENABLED) return;
   lastAppliedUpdateSettings = settings;
   // Keep this gate closed until the dependency and older-client feed isolation
   // contracts pass. This repository never generates macOS release sidecars.
@@ -175,6 +190,7 @@ async function reconcileAndPersist(
 export function configureFeed(
   settings: Pick<UpdateSettings, "channel" | "feature">,
 ): void {
+  if (!APP_UPDATES_ENABLED) return;
   if (settings.channel === "latest" && !settings.feature) {
     directFeedReleaseNotes = undefined;
     directFeedDiscoveredAvailable = undefined;
@@ -2418,6 +2434,7 @@ function wireUpdaterEvents(): void {
 }
 
 export function getUpdateStatus(): UpdateStatus {
+  if (!APP_UPDATES_ENABLED) return { state: "unsupported", message: APP_UPDATES_DISABLED_MESSAGE };
   // Derive the nudge at read time: a streak can cross the threshold without
   // any broadcast (no checking-for-update → restore no-ops), and Settings
   // seeds from this getter (#3526).
@@ -2651,6 +2668,7 @@ async function requestAutomaticUpdateCheck(
 // downloaded automatically. Both preferences come from update-settings.
 // Caller guards on app.isPackaged.
 export async function startAutoUpdates(stateDir: string): Promise<void> {
+  if (updatesDisabled()) return;
   escalationStateDir = stateDir;
   restoreStagedBuild(stateDir);
   recordUpdateDiagnostic("automatic-updates-started", { stagedVersion, stagedAtMs });
@@ -2687,6 +2705,7 @@ export async function setUpdateSettings(
   stateDir: string,
   settings: UpdateSettings,
 ): Promise<void> {
+  if (updatesDisabled()) return;
   await runSerializedUpdaterOperation("settings-write", () =>
     persistUpdaterSettings(stateDir, settings),
   );
@@ -2706,6 +2725,7 @@ export async function checkForUpdatesNow(
   stateDir: string,
   options: UpdateCheckOptions = {},
 ): Promise<void> {
+  if (updatesDisabled(options.requestId)) return;
   escalationStateDir = stateDir;
   wireUpdaterEvents();
   // Asking again IS the explicit retry the exhausted message points at.
@@ -2815,6 +2835,7 @@ export async function returnToHome(
   stateDir: string,
   requestId?: string,
 ): Promise<void> {
+  if (updatesDisabled(requestId)) return;
   escalationStateDir = stateDir;
   wireUpdaterEvents();
   if (!app.isPackaged) {
@@ -2878,6 +2899,7 @@ export async function returnToHome(
 
 // downloadUpdateNow starts downloading the update found by checkForUpdatesNow.
 export async function downloadUpdateNow(requestId?: string): Promise<void> {
+  if (updatesDisabled(requestId)) return;
   if (manualDownloadPending || lastStatus.state === "downloading" || lastStatus.state === "preparing") return;
   const version = lastStatus.version;
   wireUpdaterEvents();
@@ -2942,6 +2964,7 @@ export async function setMacDifferentialUpdates(
   stateDir: string,
   enabled: boolean,
 ): Promise<void> {
+  if (!APP_UPDATES_ENABLED) return;
   if (typeof enabled !== "boolean") return;
   developerModeRequested = enabled;
   // Revoke eligibility synchronously, even while a previous operation is busy.
@@ -3018,6 +3041,10 @@ export function getMacInstallBlocker(): string | undefined {
 // did, and #3527's dialog only ever covered the button. Turning it off makes
 // the staged build wait for a location it can actually install from.
 function applyInstallOnQuitPolicy(): void {
+  if (!APP_UPDATES_ENABLED) {
+    autoUpdater.autoInstallOnAppQuit = false;
+    return;
+  }
   const blocker = getMacInstallBlocker();
   autoUpdater.autoInstallOnAppQuit = blocker === undefined && !awaitingStagedReplacement && !nativePreparationBlocked && !stagingDiskShortfall;
   if (awaitingStagedReplacement) {
@@ -3046,6 +3073,7 @@ export function clearUpdateRestartRequest(): void {
 }
 
 export async function quitAndInstallUpdate(confirmedVersion?: string): Promise<UpdateInstallResult> {
+  if (updatesDisabled()) return;
   recordUpdateDiagnostic("install-requested", { confirmedVersion });
   if (confirmedVersion !== undefined && (typeof confirmedVersion !== "string" || !confirmedVersion.trim())) {
     throw new Error("A valid confirmed update version is required.");
@@ -3267,6 +3295,7 @@ async function prepareRememberedNonDarwinUpdate(): Promise<void> {
 // ensureUpdatePrefs prompts once (first run, before any settings file exists)
 // for auto-update opt-in + channel, with a nightly instability disclaimer.
 export async function ensureUpdatePrefs(stateDir: string): Promise<void> {
+  if (!APP_UPDATES_ENABLED) return;
   if (existsSync(path.join(stateDir, UPDATE_SETTINGS_FILE_NAME))) return;
 
   const installedNightly = installedUpdateChannel() === "nightly";

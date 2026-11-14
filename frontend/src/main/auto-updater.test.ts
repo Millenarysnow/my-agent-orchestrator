@@ -22,6 +22,7 @@ type UpdateSettingsReader = ReturnType<
 type UpdaterEventHandler = (...args: any[]) => void;
 
 type ImportOptions = {
+  appUpdatesEnabled?: boolean;
   nativeReadyManually?: boolean;
   reconcileFeaturePin?: (
     settings: UpdateSettings,
@@ -325,8 +326,16 @@ async function importAutoUpdater(
   options: ImportOptions = {},
 ) {
   vi.resetModules();
+  vi.doMock("../shared/app-update-policy", async (importOriginal) => ({
+    ...await importOriginal<typeof import("../shared/app-update-policy")>(),
+    APP_UPDATES_ENABLED: options.appUpdatesEnabled ?? true,
+  }));
   const updaterEvents = new Map<string, UpdaterEventHandler>();
   const autoUpdater = createAutoUpdaterMock();
+  if (options.appUpdatesEnabled === false) {
+    autoUpdater.autoDownload = true;
+    autoUpdater.autoInstallOnAppQuit = true;
+  }
   const powerMonitor = new EventEmitter();
   const nativeUpdaterEvents = new Map<string, UpdaterEventHandler>();
   const nativeAutoUpdater = new EventEmitter();
@@ -517,6 +526,54 @@ describe("startAutoUpdates", () => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     vi.resetModules();
+  });
+
+  it.each(["darwin", "win32", "linux"] as const)("blocks every update entry point in a disabled %s build", async (platform) => {
+    vi.useFakeTimers();
+    const restore = stubProcess(platform, process.execPath);
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    const settings: UpdateSettings = { enabled: true, channel: "nightly", nightlyAck: true, feature: { pr: 2270 } };
+    const staged = JSON.stringify({ version: "2.0.0", stagedAt: Date.now(), channel: "nightly" });
+    writeFileSync(nodePath.join(stateDir, "staged-update.json"), staged);
+    const reconcileFeaturePin = vi.fn();
+    try {
+      const { module, autoUpdater, dialog, nativeAutoUpdater, readUpdateSettings, writeUpdateSettings, updateUpdateSettings, statusMessages } =
+        await importAutoUpdater(settings, { appUpdatesEnabled: false, reconcileFeaturePin });
+      await module.ensureUpdatePrefs(stateDir);
+      await module.startAutoUpdates(stateDir);
+      await module.setUpdateSettings(stateDir, settings);
+      await module.setMacDifferentialUpdates(stateDir, true);
+      module.configureFeed(settings);
+      module.applyUpdaterPolicy(settings);
+      for (const [requestId, operation] of [
+        ["disabled-check", () => module.checkForUpdatesNow(stateDir, { settings, requestId: "disabled-check" })],
+        ["disabled-home", () => module.returnToHome(stateDir, "disabled-home")],
+        ["disabled-download", () => module.downloadUpdateNow("disabled-download")],
+      ] as const) {
+        await operation();
+        expect(statusMessages().at(-1)?.payload).toMatchObject({ state: "unsupported", requestId });
+      }
+      await module.quitAndInstallUpdate("2.0.0");
+      await vi.advanceTimersByTimeAsync(4 * 60 * 60 * 1000);
+      expect(module.getUpdateStatus()).toEqual({ state: "unsupported", message: "Application updates are disabled in this build." });
+      expect(autoUpdater.checkForUpdates).not.toHaveBeenCalled();
+      expect(autoUpdater.downloadUpdate).not.toHaveBeenCalled();
+      expect(autoUpdater.quitAndInstall).not.toHaveBeenCalled();
+      expect(autoUpdater.setFeedURL).not.toHaveBeenCalled();
+      expect(autoUpdater.on).not.toHaveBeenCalled();
+      expect(autoUpdater.autoDownload).toBe(false);
+      expect(autoUpdater.autoInstallOnAppQuit).toBe(false);
+      expect(nativeAutoUpdater.eventNames()).toEqual([]);
+      expect(dialog.showMessageBox).not.toHaveBeenCalled();
+      expect(readUpdateSettings).not.toHaveBeenCalled();
+      expect(writeUpdateSettings).not.toHaveBeenCalled();
+      expect(updateUpdateSettings).not.toHaveBeenCalled();
+      expect(reconcileFeaturePin).not.toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+      expect(readFileSync(nodePath.join(stateDir, "staged-update.json"), "utf8")).toBe(staged);
+    } finally { restore(); }
   });
 
   it("recovers a macOS ShipIt missing-file failure instead of retaining a ready update", async () => {
