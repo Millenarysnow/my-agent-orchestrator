@@ -203,6 +203,24 @@ func restorePinnedDir(parts []string, dir string) []string {
 	return parts
 }
 
+// SplitEnvAssignments separates an adapter's leading env NAME=VALUE prefix
+// from its executable argv. Native Windows launches apply these assignments to
+// the child environment instead of depending on the Unix env executable.
+// Incomplete prefixes and env options are left untouched for normal execution.
+func SplitEnvAssignments(argv []string) (assignments, rest []string) {
+	if len(argv) == 0 || filepath.Base(argv[0]) != "env" {
+		return nil, argv
+	}
+	i := 1
+	for i < len(argv) && strings.Contains(argv[i], "=") && !strings.HasPrefix(argv[i], "-") {
+		i++
+	}
+	if i >= len(argv) || strings.HasPrefix(argv[i], "-") {
+		return nil, argv
+	}
+	return argv[1:i], argv[i:]
+}
+
 func launchBinary(argv []string) (string, bool) {
 	if len(argv) == 0 {
 		return "", false

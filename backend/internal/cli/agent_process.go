@@ -7,10 +7,13 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/agentlaunch"
 )
 
 const supervisedExitReportTimeout = 5 * time.Second
@@ -79,7 +82,16 @@ func newAgentProcessSuperviseCommand(ctx *commandContext) *cobra.Command {
 }
 
 func (c *commandContext) runSupervisedProcess(ctx context.Context, sessionID, reviewID, launchID string, argv []string) {
+	// The PTY spawner only sees the outer supervisor argv. On Windows, decode
+	// an adapter's env prefix here too, where the actual agent is executed.
+	var envAssignments []string
+	if runtime.GOOS == "windows" {
+		envAssignments, argv = agentlaunch.SplitEnvAssignments(argv)
+	}
 	child := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec,forbidigo // interactive CLI child must inherit the caller's console.
+	if len(envAssignments) > 0 {
+		child.Env = append(os.Environ(), envAssignments...)
+	}
 	child.Stdin = c.deps.In
 	child.Stdout = c.deps.Out
 	child.Stderr = c.deps.Err

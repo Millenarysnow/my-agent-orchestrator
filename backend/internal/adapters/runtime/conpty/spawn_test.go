@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/runtime/conpty/ptyregistry"
+	"github.com/aoagents/agent-orchestrator/backend/internal/agentlaunch"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
@@ -45,11 +46,23 @@ func TestStripEnvAssignments(t *testing.T) {
 			wantAssignments: nil,
 			wantRest:        []string{"envoy", "--config", "x"},
 		},
+		{
+			name:            "env options remain executable arguments",
+			argv:            []string{"env", "--ignore-environment", "opencode"},
+			wantAssignments: nil,
+			wantRest:        []string{"env", "--ignore-environment", "opencode"},
+		},
+		{
+			name:            "env option values are not environment assignments",
+			argv:            []string{"env", "--chdir=/tmp", "opencode"},
+			wantAssignments: nil,
+			wantRest:        []string{"env", "--chdir=/tmp", "opencode"},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotAssignments, gotRest := stripEnvAssignments(tt.argv)
+			gotAssignments, gotRest := agentlaunch.SplitEnvAssignments(tt.argv)
 			if !reflect.DeepEqual(gotAssignments, tt.wantAssignments) {
 				t.Errorf("assignments = %#v, want %#v", gotAssignments, tt.wantAssignments)
 			}

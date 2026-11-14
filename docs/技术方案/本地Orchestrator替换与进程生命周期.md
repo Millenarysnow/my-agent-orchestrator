@@ -42,6 +42,16 @@
 
 **工作区释放失败只返回不含绝对路径或 OS 原始错误的明确 API 错误。** `Unable to start orchestrator` 会让人误以为新 harness 不可用，而错误实际上可能发生在旧 controller 或旧目录；底层错误留在 daemon 日志供诊断。
 
+## TUI 启动命令的 Windows 边界
+
+**首次启动与恢复代理必须使用同一套可执行命令语义。** OpenCode 的 TUI adapter 通过 `env KEY=VALUE … opencode …` 传入会话专属配置，OpenCode 2 还用它隔离数据目录。Windows 没有系统自带的 `env`；这些变量必须进入真实 agent 的子进程环境。
+
+**PTY spawner 与 managed-agent supervisor 共用环境前缀解析。** 未加 supervisor 的命令由 PTY spawner 处理；加 supervisor 后，外层命令是 `ao agent-process supervise … -- env …`，只有 supervisor 看得到真正的环境前缀。Windows 的 supervisor 在执行子进程前应用这些赋值；Unix 保持原有执行语义。只解释 adapter 使用的连续 `NAME=VALUE` 前缀，缺少命令或使用其它 `env` 选项时保持原参数，交给原有错误路径处理。
+
+**赋值只影响子进程，不修改 daemon、supervisor 或项目保存的配置。** 同名变量采用最后一个赋值；JSON、含空格或中文的路径、值中的等号及 shell 特殊字符都作为原始环境值和 argv 传递，不能拼接为 shell 脚本。stdout、stderr、stdin 和带 launch generation 的退出上报保持原来的所有权。
+
+**PTY 创建成功只证明终端载体存在。** supervisor 内部的 agent 仍可能启动失败，并通过退出上报使会话显示为 `exited`。重复点击恢复会重建相同的 adapter 命令，因此无法修复确定性的命令兼容错误；该错误必须在实际执行边界解决。完整的 agent-ready 握手属于独立的启动协议扩展，本方案不以 UI 的 ready 记录替代这个保证。
+
 ## 不变量与易错点
 
 **`is_terminated=true` 意味着 controller/provider 的退出已经确认。** 若先写终止状态、后异步 Stop，列表会显示结束而计费的 provider 仍工作。
